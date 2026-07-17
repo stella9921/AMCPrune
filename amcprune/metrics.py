@@ -5,6 +5,11 @@ import time
 import torch
 
 
+def reset_cuda_peak():
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+
+
 def model_parameter_memory_mb(model):
     return sum(
         parameter.numel() * parameter.element_size()
@@ -26,6 +31,18 @@ def cuda_memory_mb():
     }
 
 
+class MemoryTrace:
+    def __init__(self):
+        self.rows = []
+
+    def record(self, stage):
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        row = {"stage": stage, **cuda_memory_mb()}
+        self.rows.append(row)
+        return row
+
+
 def save_json(output_dir, name, payload):
     os.makedirs(output_dir, exist_ok=True)
     path = os.path.join(output_dir, name)
@@ -37,4 +54,3 @@ def save_json(output_dir, name, payload):
 def run_id(prefix):
     stamp = time.strftime("%Y%m%d-%H%M%S")
     return f"{prefix}__{stamp}"
-

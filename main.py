@@ -6,7 +6,13 @@ import torch
 
 from amcprune.data import load_tokenized_text_dataset
 from amcprune.evaluate import evaluate_perplexity, evaluate_preservation
-from amcprune.metrics import cuda_memory_mb, model_parameter_memory_mb, save_json
+from amcprune.metrics import (
+    MemoryTrace,
+    cuda_memory_mb,
+    model_parameter_memory_mb,
+    reset_cuda_peak,
+    save_json,
+)
 from amcprune.models import get_transformer_blocks, load_causal_lm
 from amcprune.pruning import (
     select_blocks,
@@ -53,8 +59,12 @@ def build_pruning_context(model, blocks, block_path, selected_blocks):
 def main():
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
+    memory_trace = MemoryTrace()
+    reset_cuda_peak()
+    memory_trace.record("start")
 
     model, tokenizer, device = load_causal_lm(args.model, dtype=args.dtype)
+    memory_trace.record("model_loaded")
     dataset = load_tokenized_text_dataset(
         tokenizer=tokenizer,
         dataset_name=args.dataset,
@@ -63,6 +73,7 @@ def main():
         max_samples=args.max_samples,
         seq_len=args.seq_len,
     )
+    memory_trace.record("dataset_loaded")
     blocks, block_path = get_transformer_blocks(model)
     score_rows = []
     if args.score == "activation":
@@ -74,6 +85,7 @@ def main():
             batch_size=args.batch_size,
             max_batches=args.score_max_batches,
         )
+        memory_trace.record("scoring_activation")
         selected_blocks = select_blocks_from_ranking(
             ranking=rank_blocks_by_scores(score_rows, descending=False),
             num_blocks=len(blocks),
@@ -89,6 +101,7 @@ def main():
             batch_size=args.batch_size,
             max_batches=args.score_max_batches,
         )
+        memory_trace.record("scoring_loss_delta")
         selected_blocks = select_blocks_from_ranking(
             ranking=rank_blocks_by_scores(score_rows, descending=False),
             num_blocks=len(blocks),
@@ -100,9 +113,7 @@ def main():
             pruning_ratio=args.pruning_ratio,
             score=args.score,
         )
-
-    if torch.cuda.is_available():
-        torch.cuda.reset_peak_memory_stats()
+        memory_trace.record("scoring_rule_based")
 
     baseline = evaluate_perplexity(
         model,
@@ -110,6 +121,7 @@ def main():
         device=device,
         batch_size=args.batch_size,
     )
+    memory_trace.record("baseline_eval")
     with temporary_block_skip(model, blocks, block_path, selected_blocks):
         pruned = evaluate_perplexity(
             model,
@@ -117,6 +129,7 @@ def main():
             device=device,
             batch_size=args.batch_size,
         )
+    memory_trace.record("pruned_eval")
     preservation = evaluate_preservation(
         model,
         dataset,
@@ -130,6 +143,7 @@ def main():
         batch_size=args.batch_size,
         max_batches=args.preservation_max_batches,
     )
+    memory_trace.record("preservation_eval")
 
     result = {
         "model": args.model,
@@ -150,6 +164,7 @@ def main():
         "pruned": pruned,
         "preservation": preservation,
         "perplexity_delta": pruned["perplexity"] - baseline["perplexity"],
+        "memory_trace": memory_trace.rows,
         **cuda_memory_mb(),
     }
     path = save_json(args.output_dir, "result.json", result)
@@ -179,6 +194,14 @@ def main():
         f"hidden_cos={preservation['hidden_cosine_similarity']:.6f} "
         f"logit_kl={preservation['logit_kl_divergence']:.6f}"
     )
+    print("[AMCPrune] memory trace:")
+    for row in memory_trace.rows:
+        print(
+            f"  {row['stage']}: "
+            f"allocated={row['cuda_allocated_mb']:.2f}MB "
+            f"reserved={row['cuda_reserved_mb']:.2f}MB "
+            f"peak={row['cuda_peak_allocated_mb']:.2f}MB"
+        )
     print(f"[AMCPrune] saved={path}")
 
 
