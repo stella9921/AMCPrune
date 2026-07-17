@@ -1,0 +1,2 @@
+"""AMCPrune prototype package."""
+
