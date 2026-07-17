@@ -7,11 +7,13 @@ from amcprune.evaluate import evaluate_perplexity, evaluate_preservation
 from amcprune.experiment import (
     TeeLogger,
     TimingTrace,
+    build_pruning_plan,
     prepare_output_dir,
     resolve_config,
     save_block_scores,
     save_command,
     save_json as save_json_file,
+    save_pruning_plan_units_csv,
     set_seed,
 )
 from amcprune.metrics import (
@@ -110,6 +112,81 @@ def print_config_summary(config):
     )
 
 
+def select_blocks_for_config(config, model, blocks, block_path, dataset, device):
+    score_rows = []
+    if config["score"] == "activation":
+        score_rows = score_blocks_by_activation(
+            model=model,
+            blocks=blocks,
+            dataset=dataset,
+            device=device,
+            batch_size=int(config["batch_size"]),
+            max_batches=int(config["score_max_batches"]),
+        )
+        selected_blocks = select_blocks_from_ranking(
+            ranking=rank_blocks_by_scores(score_rows, descending=False),
+            num_blocks=len(blocks),
+            pruning_ratio=float(config["pruning_ratio"]),
+        )
+    elif config["score"] == "loss_delta":
+        score_rows = score_blocks_by_loss_delta(
+            model=model,
+            blocks=blocks,
+            block_path=block_path,
+            dataset=dataset,
+            device=device,
+            batch_size=int(config["batch_size"]),
+            max_batches=int(config["score_max_batches"]),
+        )
+        selected_blocks = select_blocks_from_ranking(
+            ranking=rank_blocks_by_scores(score_rows, descending=False),
+            num_blocks=len(blocks),
+            pruning_ratio=float(config["pruning_ratio"]),
+        )
+    else:
+        selected_blocks = select_blocks(
+            num_blocks=len(blocks),
+            pruning_ratio=float(config["pruning_ratio"]),
+            score=config["score"],
+        )
+    return score_rows, selected_blocks
+
+
+def print_score_rows(config, score_rows, selected_blocks):
+    if not score_rows:
+        return
+    print(f"[AMCPrune] block {config['score']} scores:")
+    for row in score_rows:
+        marker = "*" if row["block"] in selected_blocks else " "
+        if config["score"] == "activation":
+            print(
+                f"  {marker} block={row['block']:02d} "
+                f"activation_abs_mean={row['activation_abs_mean']:.6e}"
+            )
+        elif config["score"] == "loss_delta":
+            print(
+                f"  {marker} block={row['block']:02d} "
+                f"loss_delta={row['loss_delta']:.6e} "
+                f"skipped_ppl={row['skipped_perplexity']:.4f}"
+            )
+
+
+def print_pruning_plan(pruning_plan):
+    print(
+        f"[Pruning Plan] unit={pruning_plan['pruning_unit']} "
+        f"selected={pruning_plan['selected_units']}/{pruning_plan['total_units']} "
+        f"actual_ratio={pruning_plan['actual_unit_pruning_ratio']:.4f}"
+    )
+    for unit in pruning_plan["units"]:
+        marker = "*" if unit["selected"] else " "
+        score_value = unit["score_value"]
+        score_text = "NA" if score_value is None else f"{score_value:.6e}"
+        print(
+            f"  {marker} {unit['unit_name']} type={unit['unit_type']} "
+            f"score={score_text} reason={unit['reason']}"
+        )
+
+
 def main():
     args = parse_args()
     config = resolve_config(args, DEFAULT_CONFIG)
@@ -148,53 +225,36 @@ def main():
         blocks, block_path = get_transformer_blocks(model)
         print(f"[Topology] blocks={len(blocks)} path={block_path}")
 
-        score_rows = []
         with timing_trace.stage(f"scoring_{config['score']}"):
-            if config["score"] == "activation":
-                score_rows = score_blocks_by_activation(
-                    model=model,
-                    blocks=blocks,
-                    dataset=dataset,
-                    device=device,
-                    batch_size=int(config["batch_size"]),
-                    max_batches=int(config["score_max_batches"]),
-                )
-                selected_blocks = select_blocks_from_ranking(
-                    ranking=rank_blocks_by_scores(score_rows, descending=False),
-                    num_blocks=len(blocks),
-                    pruning_ratio=float(config["pruning_ratio"]),
-                )
-            elif config["score"] == "loss_delta":
-                score_rows = score_blocks_by_loss_delta(
-                    model=model,
-                    blocks=blocks,
-                    block_path=block_path,
-                    dataset=dataset,
-                    device=device,
-                    batch_size=int(config["batch_size"]),
-                    max_batches=int(config["score_max_batches"]),
-                )
-                selected_blocks = select_blocks_from_ranking(
-                    ranking=rank_blocks_by_scores(score_rows, descending=False),
-                    num_blocks=len(blocks),
-                    pruning_ratio=float(config["pruning_ratio"]),
-                )
-            else:
-                selected_blocks = select_blocks(
-                    num_blocks=len(blocks),
-                    pruning_ratio=float(config["pruning_ratio"]),
-                    score=config["score"],
-                )
+            score_rows, selected_blocks = select_blocks_for_config(
+                config=config,
+                model=model,
+                blocks=blocks,
+                block_path=block_path,
+                dataset=dataset,
+                device=device,
+            )
         memory_trace.record(f"scoring_{config['score']}")
 
-        score_json_path = os.path.join(output_dir, "block_scores.json")
-        score_csv_path = os.path.join(output_dir, "block_scores.csv")
-        save_json_file(score_json_path, {
+        pruning_plan = build_pruning_plan(
+            model_name=config["model"],
+            block_path=block_path,
+            num_blocks=len(blocks),
+            pruning_unit="block_skip",
+            pruning_ratio=float(config["pruning_ratio"]),
+            score_name=config["score"],
+            score_rows=score_rows,
+            selected_blocks=selected_blocks,
+        )
+        save_json_file(os.path.join(output_dir, "block_scores.json"), {
             "score": config["score"],
             "selected_blocks": selected_blocks,
             "rows": score_rows,
         })
-        save_block_scores(score_csv_path, score_rows, selected_blocks)
+        save_block_scores(os.path.join(output_dir, "block_scores.csv"), score_rows, selected_blocks)
+        save_json_file(os.path.join(output_dir, "pruning_plan.json"), pruning_plan)
+        save_pruning_plan_units_csv(os.path.join(output_dir, "pruning_plan_units.csv"), pruning_plan)
+        print_pruning_plan(pruning_plan)
 
         with timing_trace.stage("baseline_eval"):
             baseline = evaluate_perplexity(
@@ -246,6 +306,7 @@ def main():
             "score_max_batches": int(config["score_max_batches"]),
             "preservation_max_batches": int(config["preservation_max_batches"]),
             "block_scores": score_rows,
+            "pruning_plan": pruning_plan,
             "selected_blocks": selected_blocks,
             "parameter_memory_mb": model_parameter_memory_mb(model),
             "baseline": baseline,
@@ -269,6 +330,9 @@ def main():
                     "pruning_unit": "block_skip",
                     "block_path": block_path,
                     "selected_blocks": selected_blocks,
+                    "selected_unit_names": [
+                        unit["unit_name"] for unit in pruning_plan["units"] if unit["selected"]
+                    ],
                     "score": config["score"],
                     "pruning_ratio": float(config["pruning_ratio"]),
                     "run_id": run_id,
@@ -284,21 +348,7 @@ def main():
 
         print(f"[AMCPrune] model={config['model']}")
         print(f"[AMCPrune] blocks={len(blocks)} path={block_path}")
-        if score_rows:
-            print(f"[AMCPrune] block {config['score']} scores:")
-            for row in score_rows:
-                marker = "*" if row["block"] in selected_blocks else " "
-                if config["score"] == "activation":
-                    print(
-                        f"  {marker} block={row['block']:02d} "
-                        f"activation_abs_mean={row['activation_abs_mean']:.6e}"
-                    )
-                elif config["score"] == "loss_delta":
-                    print(
-                        f"  {marker} block={row['block']:02d} "
-                        f"loss_delta={row['loss_delta']:.6e} "
-                        f"skipped_ppl={row['skipped_perplexity']:.4f}"
-                    )
+        print_score_rows(config, score_rows, selected_blocks)
         print(f"[AMCPrune] selected_blocks={selected_blocks}")
         print(f"[AMCPrune] baseline_ppl={baseline['perplexity']:.4f}")
         print(f"[AMCPrune] pruned_ppl={pruned['perplexity']:.4f}")
@@ -330,3 +380,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

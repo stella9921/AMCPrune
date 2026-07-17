@@ -166,3 +166,70 @@ def save_block_scores(path, score_rows, selected_blocks):
             payload["selected"] = row.get("block") in selected
             writer.writerow(payload)
     return path
+
+
+def build_pruning_plan(
+    *,
+    model_name,
+    block_path,
+    num_blocks,
+    pruning_unit,
+    pruning_ratio,
+    score_name,
+    score_rows,
+    selected_blocks,
+):
+    selected = set(selected_blocks)
+    score_by_block = {row.get("block"): row for row in score_rows}
+    units = []
+    for index in range(num_blocks):
+        row = score_by_block.get(index, {})
+        units.append({
+            "unit_id": index,
+            "unit_name": f"{block_path}.{index}",
+            "unit_type": pruning_unit,
+            "parent_path": block_path,
+            "selected": index in selected,
+            "score_name": score_name,
+            "score_value": row.get("score"),
+            "score_details": row,
+            "reason": "selected by lowest score" if index in selected else "kept by score ranking",
+        })
+    selected_units = [unit for unit in units if unit["selected"]]
+    return {
+        "schema_version": 1,
+        "model": model_name,
+        "pruning_unit": pruning_unit,
+        "pruning_scope": block_path,
+        "score_name": score_name,
+        "pruning_ratio_target": float(pruning_ratio),
+        "total_units": num_blocks,
+        "selected_units": len(selected_units),
+        "actual_unit_pruning_ratio": len(selected_units) / max(num_blocks, 1),
+        "selected_unit_ids": selected_blocks,
+        "units": units,
+        "notes": (
+            "The schema is unit-agnostic. Future head or FFN-neuron pruning can "
+            "reuse unit_type, parent_path, score_value, selected, and reason."
+        ),
+    }
+
+
+def save_pruning_plan_units_csv(path, pruning_plan):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fieldnames = [
+        "unit_id",
+        "unit_name",
+        "unit_type",
+        "parent_path",
+        "selected",
+        "score_name",
+        "score_value",
+        "reason",
+    ]
+    with open(path, "w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fieldnames)
+        writer.writeheader()
+        for unit in pruning_plan["units"]:
+            writer.writerow({key: unit.get(key) for key in fieldnames})
+    return path
