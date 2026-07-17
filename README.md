@@ -61,3 +61,38 @@ use presets while still allowing quick ablations such as:
 ```bash
 python main.py --strategy gpt2_loss_delta --pruning-ratio 0.2 --seed 123
 ```
+
+## Activation-Weight Block Scoring
+
+The current cheap structured score can rank transformer blocks by:
+
+```text
+score = block activation abs mean x block weight abs mean
+```
+
+Run once and store block scores:
+
+```bash
+python main.py --strategy gpt2_activation_weight
+```
+
+Reuse the saved score file with a different pruning ratio without recomputing scores:
+
+```bash
+python main.py \
+  --strategy gpt2_activation_weight \
+  --score-cache exp/runs/<run_id>/block_scores.json \
+  --pruning-ratio 0.2
+```
+
+Compare dense and pruned downstream task performance:
+
+```bash
+python scripts/evaluate_dense_vs_pruned.py \
+  --pruning-config exp/runs/<run_id>/pruned_model/amcprune_pruning_config.json \
+  --tasks hellaswag,piqa,arc_easy \
+  --device cuda:0 \
+  --batch-size 4 \
+  --limit 100 \
+  --output-path exp/lm_eval/<run_id>__dense_vs_pruned.json
+```

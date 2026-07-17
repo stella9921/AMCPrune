@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 from contextlib import contextmanager
 
@@ -33,6 +34,7 @@ from amcprune.pruning import (
 from amcprune.scoring import (
     rank_blocks_by_scores,
     score_blocks_by_activation,
+    score_blocks_by_activation_weight,
     score_blocks_by_loss_delta,
 )
 
@@ -48,6 +50,7 @@ DEFAULT_CONFIG = {
     "dtype": "auto",
     "pruning_ratio": 0.25,
     "score": "block_index",
+    "score_cache": None,
     "score_max_batches": 8,
     "preservation_max_batches": 8,
     "export_pruned_model": False,
@@ -72,9 +75,10 @@ def parse_args():
     parser.add_argument("--pruning-ratio", dest="pruning_ratio", type=float, default=None)
     parser.add_argument(
         "--score",
-        choices=["block_index", "early_block", "activation", "loss_delta"],
+        choices=["block_index", "early_block", "activation", "activation_weight", "loss_delta"],
         default=None,
     )
+    parser.add_argument("--score-cache", dest="score_cache", default=None)
     parser.add_argument("--score-max-batches", dest="score_max_batches", type=int, default=None)
     parser.add_argument(
         "--preservation-max-batches",
@@ -110,10 +114,32 @@ def print_config_summary(config):
         f"max_samples={config['max_samples']} seq_len={config['seq_len']} "
         f"batch_size={config['batch_size']} seed={config.get('seed')}"
     )
+    if config.get("score_cache"):
+        print(f"[Config] score_cache={config['score_cache']}")
+
+
+def load_score_cache(path):
+    with open(path, "r", encoding="utf-8") as stream:
+        payload = json.load(stream)
+    if isinstance(payload, dict) and "rows" in payload:
+        return payload["rows"]
+    if isinstance(payload, dict) and "block_scores" in payload:
+        return payload["block_scores"]
+    if isinstance(payload, list):
+        return payload
+    raise ValueError(f"Unsupported score cache format: {path}")
 
 
 def select_blocks_for_config(config, model, blocks, block_path, dataset, device):
-    score_rows = []
+    if config.get("score_cache"):
+        score_rows = load_score_cache(config["score_cache"])
+        selected_blocks = select_blocks_from_ranking(
+            ranking=rank_blocks_by_scores(score_rows, descending=False),
+            num_blocks=len(blocks),
+            pruning_ratio=float(config["pruning_ratio"]),
+        )
+        return score_rows, selected_blocks
+
     if config["score"] == "activation":
         score_rows = score_blocks_by_activation(
             model=model,
@@ -123,10 +149,14 @@ def select_blocks_for_config(config, model, blocks, block_path, dataset, device)
             batch_size=int(config["batch_size"]),
             max_batches=int(config["score_max_batches"]),
         )
-        selected_blocks = select_blocks_from_ranking(
-            ranking=rank_blocks_by_scores(score_rows, descending=False),
-            num_blocks=len(blocks),
-            pruning_ratio=float(config["pruning_ratio"]),
+    elif config["score"] == "activation_weight":
+        score_rows = score_blocks_by_activation_weight(
+            model=model,
+            blocks=blocks,
+            dataset=dataset,
+            device=device,
+            batch_size=int(config["batch_size"]),
+            max_batches=int(config["score_max_batches"]),
         )
     elif config["score"] == "loss_delta":
         score_rows = score_blocks_by_loss_delta(
@@ -138,17 +168,19 @@ def select_blocks_for_config(config, model, blocks, block_path, dataset, device)
             batch_size=int(config["batch_size"]),
             max_batches=int(config["score_max_batches"]),
         )
-        selected_blocks = select_blocks_from_ranking(
-            ranking=rank_blocks_by_scores(score_rows, descending=False),
-            num_blocks=len(blocks),
-            pruning_ratio=float(config["pruning_ratio"]),
-        )
     else:
         selected_blocks = select_blocks(
             num_blocks=len(blocks),
             pruning_ratio=float(config["pruning_ratio"]),
             score=config["score"],
         )
+        return [], selected_blocks
+
+    selected_blocks = select_blocks_from_ranking(
+        ranking=rank_blocks_by_scores(score_rows, descending=False),
+        num_blocks=len(blocks),
+        pruning_ratio=float(config["pruning_ratio"]),
+    )
     return score_rows, selected_blocks
 
 
@@ -163,12 +195,21 @@ def print_score_rows(config, score_rows, selected_blocks):
                 f"  {marker} block={row['block']:02d} "
                 f"activation_abs_mean={row['activation_abs_mean']:.6e}"
             )
+        elif config["score"] == "activation_weight":
+            print(
+                f"  {marker} block={row['block']:02d} "
+                f"activation_abs_mean={row['activation_abs_mean']:.6e} "
+                f"weight_abs_mean={row['weight_abs_mean']:.6e} "
+                f"score={row['score']:.6e}"
+            )
         elif config["score"] == "loss_delta":
             print(
                 f"  {marker} block={row['block']:02d} "
                 f"loss_delta={row['loss_delta']:.6e} "
                 f"skipped_ppl={row['skipped_perplexity']:.4f}"
             )
+        else:
+            print(f"  {marker} block={row['block']:02d} score={row['score']:.6e}")
 
 
 def print_pruning_plan(pruning_plan):
@@ -303,6 +344,7 @@ def main():
             "pruning_unit": "block_skip",
             "pruning_ratio": float(config["pruning_ratio"]),
             "score": config["score"],
+            "score_cache": config.get("score_cache"),
             "score_max_batches": int(config["score_max_batches"]),
             "preservation_max_batches": int(config["preservation_max_batches"]),
             "block_scores": score_rows,
@@ -334,6 +376,7 @@ def main():
                         unit["unit_name"] for unit in pruning_plan["units"] if unit["selected"]
                     ],
                     "score": config["score"],
+                    "score_cache": config.get("score_cache"),
                     "pruning_ratio": float(config["pruning_ratio"]),
                     "run_id": run_id,
                 })
@@ -380,4 +423,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

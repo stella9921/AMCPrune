@@ -13,6 +13,16 @@ def _extract_hidden(output):
     return None
 
 
+def _block_weight_abs_mean(block):
+    total = 0.0
+    count = 0
+    for parameter in block.parameters():
+        values = parameter.detach().float().abs()
+        total += float(values.sum().cpu().item())
+        count += values.numel()
+    return total / max(count, 1)
+
+
 @torch.no_grad()
 def score_blocks_by_activation(model, blocks, dataset, device, batch_size=1, max_batches=8):
     sums = torch.zeros(len(blocks), dtype=torch.float64)
@@ -54,6 +64,37 @@ def score_blocks_by_activation(model, blocks, dataset, device, batch_size=1, max
         scores.append({
             "block": index,
             "activation_abs_mean": score,
+            "score": score,
+        })
+    return scores
+
+
+@torch.no_grad()
+def score_blocks_by_activation_weight(
+    model,
+    blocks,
+    dataset,
+    device,
+    batch_size=1,
+    max_batches=8,
+):
+    activation_rows = score_blocks_by_activation(
+        model=model,
+        blocks=blocks,
+        dataset=dataset,
+        device=device,
+        batch_size=batch_size,
+        max_batches=max_batches,
+    )
+    scores = []
+    for row, block in zip(activation_rows, blocks):
+        weight_abs_mean = _block_weight_abs_mean(block)
+        activation_abs_mean = row["activation_abs_mean"]
+        score = activation_abs_mean * weight_abs_mean
+        scores.append({
+            "block": row["block"],
+            "activation_abs_mean": activation_abs_mean,
+            "weight_abs_mean": weight_abs_mean,
             "score": score,
         })
     return scores
