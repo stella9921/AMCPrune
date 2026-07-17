@@ -1,10 +1,11 @@
 import argparse
 import os
+from contextlib import contextmanager
 
 import torch
 
 from amcprune.data import load_tokenized_text_dataset
-from amcprune.evaluate import evaluate_perplexity
+from amcprune.evaluate import evaluate_perplexity, evaluate_preservation
 from amcprune.metrics import cuda_memory_mb, model_parameter_memory_mb, save_json
 from amcprune.models import get_transformer_blocks, load_causal_lm
 from amcprune.pruning import (
@@ -36,8 +37,17 @@ def parse_args():
         default="block_index",
     )
     parser.add_argument("--score-max-batches", type=int, default=8)
+    parser.add_argument("--preservation-max-batches", type=int, default=8)
     parser.add_argument("--output-dir", default="exp/smoke")
     return parser.parse_args()
+
+
+def build_pruning_context(model, blocks, block_path, selected_blocks):
+    @contextmanager
+    def apply_pruning():
+        with temporary_block_skip(model, blocks, block_path, selected_blocks):
+            yield
+    return apply_pruning
 
 
 def main():
@@ -107,6 +117,19 @@ def main():
             device=device,
             batch_size=args.batch_size,
         )
+    preservation = evaluate_preservation(
+        model,
+        dataset,
+        device=device,
+        apply_pruning=build_pruning_context(
+            model,
+            blocks,
+            block_path,
+            selected_blocks,
+        ),
+        batch_size=args.batch_size,
+        max_batches=args.preservation_max_batches,
+    )
 
     result = {
         "model": args.model,
@@ -119,11 +142,13 @@ def main():
         "pruning_ratio": args.pruning_ratio,
         "score": args.score,
         "score_max_batches": args.score_max_batches,
+        "preservation_max_batches": args.preservation_max_batches,
         "block_scores": score_rows,
         "selected_blocks": selected_blocks,
         "parameter_memory_mb": model_parameter_memory_mb(model),
         "baseline": baseline,
         "pruned": pruned,
+        "preservation": preservation,
         "perplexity_delta": pruned["perplexity"] - baseline["perplexity"],
         **cuda_memory_mb(),
     }
@@ -149,6 +174,11 @@ def main():
     print(f"[AMCPrune] selected_blocks={selected_blocks}")
     print(f"[AMCPrune] baseline_ppl={baseline['perplexity']:.4f}")
     print(f"[AMCPrune] pruned_ppl={pruned['perplexity']:.4f}")
+    print(
+        "[AMCPrune] preservation "
+        f"hidden_cos={preservation['hidden_cosine_similarity']:.6f} "
+        f"logit_kl={preservation['logit_kl_divergence']:.6f}"
+    )
     print(f"[AMCPrune] saved={path}")
 
 
