@@ -17,6 +17,7 @@ from amcprune.experiment import (
     save_pruning_plan_units_csv,
     set_seed,
 )
+from amcprune.importance_scores import AMCImportanceScores
 from amcprune.metrics import (
     MemoryTrace,
     cuda_memory_mb,
@@ -119,6 +120,8 @@ def print_config_summary(config):
 
 
 def load_score_cache(path):
+    if path.endswith(".pt") or path.endswith(".pth"):
+        return AMCImportanceScores.load(path).to_block_rows()
     with open(path, "r", encoding="utf-8") as stream:
         payload = json.load(stream)
     if isinstance(payload, dict) and "rows" in payload:
@@ -287,12 +290,36 @@ def main():
             score_rows=score_rows,
             selected_blocks=selected_blocks,
         )
-        save_json_file(os.path.join(output_dir, "block_scores.json"), {
+        score_json = {
             "score": config["score"],
             "selected_blocks": selected_blocks,
             "rows": score_rows,
-        })
+        }
+        save_json_file(os.path.join(output_dir, "block_scores.json"), score_json)
         save_block_scores(os.path.join(output_dir, "block_scores.csv"), score_rows, selected_blocks)
+        if score_rows:
+            importance_scores = AMCImportanceScores.from_block_rows(
+                rows=score_rows,
+                model=config["model"],
+                block_path=block_path,
+                score_name=config["score"],
+                metadata={
+                    "run_id": run_id,
+                    "strategy": config["strategy"],
+                    "dataset": config["dataset"],
+                    "dataset_config": config["dataset_config"],
+                    "split": config["split"],
+                    "max_samples": config["max_samples"],
+                    "seq_len": config["seq_len"],
+                    "score_max_batches": config["score_max_batches"],
+                    "seed": config.get("seed"),
+                },
+            )
+            importance_scores_path = os.path.join(output_dir, "importance-scores.pt")
+            importance_scores.save(importance_scores_path)
+            score_json["importance_scores_path"] = importance_scores_path
+            save_json_file(os.path.join(output_dir, "block_scores.json"), score_json)
+            print(f"[Scores] saved importance scores: {importance_scores_path}")
         save_json_file(os.path.join(output_dir, "pruning_plan.json"), pruning_plan)
         save_pruning_plan_units_csv(os.path.join(output_dir, "pruning_plan_units.csv"), pruning_plan)
         print_pruning_plan(pruning_plan)
@@ -423,3 +450,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+

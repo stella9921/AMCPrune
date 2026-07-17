@@ -76,12 +76,12 @@ Run once and store block scores:
 python main.py --strategy gpt2_activation_weight
 ```
 
-Reuse the saved score file with a different pruning ratio without recomputing scores:
+Reuse the saved SnapViT-style `.pt` score file with a different pruning ratio without recomputing scores:
 
 ```bash
 python main.py \
   --strategy gpt2_activation_weight \
-  --score-cache exp/runs/<run_id>/block_scores.json \
+  --score-cache exp/runs/<run_id>/importance-scores.pt \
   --pruning-ratio 0.2
 ```
 
@@ -96,3 +96,4 @@ python scripts/evaluate_dense_vs_pruned.py \
   --limit 100 \
   --output-path exp/lm_eval/<run_id>__dense_vs_pruned.json
 ```
+
