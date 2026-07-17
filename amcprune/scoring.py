@@ -1,6 +1,9 @@
 import torch
 from torch.utils.data import DataLoader
 
+from amcprune.evaluate import evaluate_perplexity
+from amcprune.pruning import temporary_block_skip
+
 
 def _extract_hidden(output):
     if torch.is_tensor(output):
@@ -52,6 +55,46 @@ def score_blocks_by_activation(model, blocks, dataset, device, batch_size=1, max
             "block": index,
             "activation_abs_mean": score,
             "score": score,
+        })
+    return scores
+
+
+@torch.no_grad()
+def score_blocks_by_loss_delta(
+    model,
+    blocks,
+    block_path,
+    dataset,
+    device,
+    batch_size=1,
+    max_batches=8,
+):
+    baseline = evaluate_perplexity(
+        model,
+        dataset,
+        device=device,
+        batch_size=batch_size,
+        max_batches=max_batches,
+    )
+    scores = []
+    for index in range(len(blocks)):
+        with temporary_block_skip(model, blocks, block_path, [index]):
+            skipped = evaluate_perplexity(
+                model,
+                dataset,
+                device=device,
+                batch_size=batch_size,
+                max_batches=max_batches,
+            )
+        loss_delta = skipped["loss"] - baseline["loss"]
+        scores.append({
+            "block": index,
+            "baseline_loss": baseline["loss"],
+            "skipped_loss": skipped["loss"],
+            "loss_delta": loss_delta,
+            "baseline_perplexity": baseline["perplexity"],
+            "skipped_perplexity": skipped["perplexity"],
+            "score": loss_delta,
         })
     return scores
 

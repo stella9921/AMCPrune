@@ -12,7 +12,11 @@ from amcprune.pruning import (
     select_blocks_from_ranking,
     temporary_block_skip,
 )
-from amcprune.scoring import rank_blocks_by_scores, score_blocks_by_activation
+from amcprune.scoring import (
+    rank_blocks_by_scores,
+    score_blocks_by_activation,
+    score_blocks_by_loss_delta,
+)
 
 
 def parse_args():
@@ -28,7 +32,7 @@ def parse_args():
     parser.add_argument("--pruning-ratio", type=float, default=0.25)
     parser.add_argument(
         "--score",
-        choices=["block_index", "early_block", "activation"],
+        choices=["block_index", "early_block", "activation", "loss_delta"],
         default="block_index",
     )
     parser.add_argument("--score-max-batches", type=int, default=8)
@@ -55,6 +59,21 @@ def main():
         score_rows = score_blocks_by_activation(
             model=model,
             blocks=blocks,
+            dataset=dataset,
+            device=device,
+            batch_size=args.batch_size,
+            max_batches=args.score_max_batches,
+        )
+        selected_blocks = select_blocks_from_ranking(
+            ranking=rank_blocks_by_scores(score_rows, descending=False),
+            num_blocks=len(blocks),
+            pruning_ratio=args.pruning_ratio,
+        )
+    elif args.score == "loss_delta":
+        score_rows = score_blocks_by_loss_delta(
+            model=model,
+            blocks=blocks,
+            block_path=block_path,
             dataset=dataset,
             device=device,
             batch_size=args.batch_size,
@@ -113,13 +132,20 @@ def main():
     print(f"[AMCPrune] model={args.model}")
     print(f"[AMCPrune] blocks={len(blocks)} path={block_path}")
     if score_rows:
-        print("[AMCPrune] block activation scores:")
+        print(f"[AMCPrune] block {args.score} scores:")
         for row in score_rows:
             marker = "*" if row["block"] in selected_blocks else " "
-            print(
-                f"  {marker} block={row['block']:02d} "
-                f"activation_abs_mean={row['activation_abs_mean']:.6e}"
-            )
+            if args.score == "activation":
+                print(
+                    f"  {marker} block={row['block']:02d} "
+                    f"activation_abs_mean={row['activation_abs_mean']:.6e}"
+                )
+            elif args.score == "loss_delta":
+                print(
+                    f"  {marker} block={row['block']:02d} "
+                    f"loss_delta={row['loss_delta']:.6e} "
+                    f"skipped_ppl={row['skipped_perplexity']:.4f}"
+                )
     print(f"[AMCPrune] selected_blocks={selected_blocks}")
     print(f"[AMCPrune] baseline_ppl={baseline['perplexity']:.4f}")
     print(f"[AMCPrune] pruned_ppl={pruned['perplexity']:.4f}")
