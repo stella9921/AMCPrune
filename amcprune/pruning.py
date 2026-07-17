@@ -35,8 +35,7 @@ def select_blocks_from_ranking(ranking, num_blocks, pruning_ratio):
     return list(ranking)[:count]
 
 
-@contextmanager
-def temporary_block_skip(model, blocks, block_path, selected_indices):
+def apply_block_skip(model, block_path, selected_indices):
     parent = model
     parts = block_path.split(".")
     for part in parts[:-1]:
@@ -47,11 +46,23 @@ def temporary_block_skip(model, blocks, block_path, selected_indices):
     selected = set(selected_indices)
     for index in selected:
         wrapped[index] = SkipBlock(wrapped[index])
+    if hasattr(original, "__class__") and original.__class__.__name__ == "ModuleList":
+        setattr(parent, attr, nn.ModuleList(wrapped))
+    else:
+        setattr(parent, attr, wrapped)
+    return model
+
+
+@contextmanager
+def temporary_block_skip(model, blocks, block_path, selected_indices):
+    parent = model
+    parts = block_path.split(".")
+    for part in parts[:-1]:
+        parent = getattr(parent, part)
+    attr = parts[-1]
+    original = getattr(parent, attr)
     try:
-        if hasattr(original, "__class__") and original.__class__.__name__ == "ModuleList":
-            setattr(parent, attr, nn.ModuleList(wrapped))
-        else:
-            setattr(parent, attr, wrapped)
+        apply_block_skip(model, block_path, selected_indices)
         yield
     finally:
         setattr(parent, attr, original)

@@ -15,6 +15,7 @@ from amcprune.metrics import (
 )
 from amcprune.models import get_transformer_blocks, load_causal_lm
 from amcprune.pruning import (
+    apply_block_skip,
     select_blocks,
     select_blocks_from_ranking,
     temporary_block_skip,
@@ -44,6 +45,7 @@ def parse_args():
     )
     parser.add_argument("--score-max-batches", type=int, default=8)
     parser.add_argument("--preservation-max-batches", type=int, default=8)
+    parser.add_argument("--export-pruned-model", action="store_true")
     parser.add_argument("--output-dir", default="exp/smoke")
     return parser.parse_args()
 
@@ -167,6 +169,25 @@ def main():
         "memory_trace": memory_trace.rows,
         **cuda_memory_mb(),
     }
+
+    export_dir = None
+    if args.export_pruned_model:
+        export_dir = os.path.join(args.output_dir, "pruned_model")
+        apply_block_skip(model, block_path, selected_blocks)
+        model.save_pretrained(export_dir)
+        tokenizer.save_pretrained(export_dir)
+        save_json(export_dir, "amcprune_pruning_config.json", {
+            "base_model": args.model,
+            "pruning_unit": "block_skip",
+            "block_path": block_path,
+            "selected_blocks": selected_blocks,
+            "score": args.score,
+            "pruning_ratio": args.pruning_ratio,
+        })
+        memory_trace.record("export_pruned_model")
+        result["exported_pruned_model"] = export_dir
+        result["memory_trace"] = memory_trace.rows
+
     path = save_json(args.output_dir, "result.json", result)
 
     print(f"[AMCPrune] model={args.model}")
@@ -194,6 +215,8 @@ def main():
         f"hidden_cos={preservation['hidden_cosine_similarity']:.6f} "
         f"logit_kl={preservation['logit_kl_divergence']:.6f}"
     )
+    if export_dir:
+        print(f"[AMCPrune] exported_pruned_model={export_dir}")
     print("[AMCPrune] memory trace:")
     for row in memory_trace.rows:
         print(
