@@ -11,6 +11,10 @@ Initial goal:
 4. Apply a simple block-level pruning mask.
 5. Measure pruned perplexity and memory metrics.
 
+Text data preprocessing follows the HuggingFace causal language modeling example
+style: load a dataset from the Hub, tokenize text with `AutoTokenizer`, concatenate
+tokens, and split them into fixed-length `block_size` chunks for causal LM loss.
+
 The first prototype intentionally keeps the scoring simple so that the LLM
 pruning pipeline can run end to end before adding Fisher/Hessian refinement.
 
@@ -28,4 +32,3 @@ python main.py \
   --score block_index \
   --output-dir exp/smoke_tiny_gpt2
 ```
-
