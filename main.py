@@ -38,6 +38,7 @@ from amcprune.scoring import (
     score_blocks_by_activation_weight,
     score_blocks_by_loss_delta,
 )
+from amcprune.visualization import plot_run_artifacts
 
 
 DEFAULT_CONFIG = {
@@ -412,9 +413,23 @@ def main():
             result["memory_trace"] = memory_trace.rows
             result["timing_trace"] = timing_trace.rows
 
+        plot_paths = plot_run_artifacts(
+            output_dir=output_dir,
+            run_id=run_id,
+            score_rows=score_rows,
+            selected_blocks=selected_blocks,
+            pruning_plan=pruning_plan,
+            baseline=baseline,
+            pruned=pruned,
+            preservation=preservation,
+            memory_trace=memory_trace.rows,
+            timing_trace=timing_trace.rows,
+        )
+        result["plots"] = plot_paths
         path = save_json(output_dir, "result.json", result)
         save_json_file(os.path.join(output_dir, "timing_trace.json"), timing_trace.rows)
         save_json_file(os.path.join(output_dir, "memory_trace.json"), memory_trace.rows)
+        save_json_file(os.path.join(output_dir, "plots.json"), plot_paths)
 
         print(f"[AMCPrune] model={config['model']}")
         print(f"[AMCPrune] blocks={len(blocks)} path={block_path}")
@@ -443,6 +458,8 @@ def main():
                 f"  {row['stage']}: seconds={row['seconds']:.2f} "
                 f"elapsed={row['elapsed_seconds']:.2f}"
             )
+        if plot_paths:
+            print(f"[Visualization] saved {len(plot_paths)} plots under {os.path.join(output_dir, 'plots')}")
         print(f"[AMCPrune] saved={path}")
     finally:
         logger.close()
@@ -450,6 +467,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
