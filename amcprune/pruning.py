@@ -29,6 +29,12 @@ def select_blocks(num_blocks, pruning_ratio, score="block_index"):
     return rank_blocks(num_blocks, score=score)[:count]
 
 
+def select_blocks_from_ranking(ranking, num_blocks, pruning_ratio):
+    count = max(1, int(round(num_blocks * pruning_ratio)))
+    count = min(count, max(num_blocks - 1, 1))
+    return list(ranking)[:count]
+
+
 @contextmanager
 def temporary_block_skip(model, blocks, block_path, selected_indices):
     parent = model

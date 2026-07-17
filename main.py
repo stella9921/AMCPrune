@@ -7,7 +7,12 @@ from amcprune.data import load_tokenized_text_dataset
 from amcprune.evaluate import evaluate_perplexity
 from amcprune.metrics import cuda_memory_mb, model_parameter_memory_mb, save_json
 from amcprune.models import get_transformer_blocks, load_causal_lm
-from amcprune.pruning import select_blocks, temporary_block_skip
+from amcprune.pruning import (
+    select_blocks,
+    select_blocks_from_ranking,
+    temporary_block_skip,
+)
+from amcprune.scoring import rank_blocks_by_scores, score_blocks_by_activation
 
 
 def parse_args():
@@ -21,7 +26,12 @@ def parse_args():
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--dtype", choices=["auto", "fp32", "fp16", "bf16"], default="auto")
     parser.add_argument("--pruning-ratio", type=float, default=0.25)
-    parser.add_argument("--score", choices=["block_index", "early_block"], default="block_index")
+    parser.add_argument(
+        "--score",
+        choices=["block_index", "early_block", "activation"],
+        default="block_index",
+    )
+    parser.add_argument("--score-max-batches", type=int, default=8)
     parser.add_argument("--output-dir", default="exp/smoke")
     return parser.parse_args()
 
@@ -40,11 +50,27 @@ def main():
         seq_len=args.seq_len,
     )
     blocks, block_path = get_transformer_blocks(model)
-    selected_blocks = select_blocks(
-        num_blocks=len(blocks),
-        pruning_ratio=args.pruning_ratio,
-        score=args.score,
-    )
+    score_rows = []
+    if args.score == "activation":
+        score_rows = score_blocks_by_activation(
+            model=model,
+            blocks=blocks,
+            dataset=dataset,
+            device=device,
+            batch_size=args.batch_size,
+            max_batches=args.score_max_batches,
+        )
+        selected_blocks = select_blocks_from_ranking(
+            ranking=rank_blocks_by_scores(score_rows, descending=False),
+            num_blocks=len(blocks),
+            pruning_ratio=args.pruning_ratio,
+        )
+    else:
+        selected_blocks = select_blocks(
+            num_blocks=len(blocks),
+            pruning_ratio=args.pruning_ratio,
+            score=args.score,
+        )
 
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
@@ -73,6 +99,8 @@ def main():
         "pruning_unit": "block_skip",
         "pruning_ratio": args.pruning_ratio,
         "score": args.score,
+        "score_max_batches": args.score_max_batches,
+        "block_scores": score_rows,
         "selected_blocks": selected_blocks,
         "parameter_memory_mb": model_parameter_memory_mb(model),
         "baseline": baseline,
@@ -84,6 +112,14 @@ def main():
 
     print(f"[AMCPrune] model={args.model}")
     print(f"[AMCPrune] blocks={len(blocks)} path={block_path}")
+    if score_rows:
+        print("[AMCPrune] block activation scores:")
+        for row in score_rows:
+            marker = "*" if row["block"] in selected_blocks else " "
+            print(
+                f"  {marker} block={row['block']:02d} "
+                f"activation_abs_mean={row['activation_abs_mean']:.6e}"
+            )
     print(f"[AMCPrune] selected_blocks={selected_blocks}")
     print(f"[AMCPrune] baseline_ppl={baseline['perplexity']:.4f}")
     print(f"[AMCPrune] pruned_ppl={pruned['perplexity']:.4f}")
@@ -92,4 +128,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
