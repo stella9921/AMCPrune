@@ -32,3 +32,32 @@ python main.py \
   --score block_index \
   --output-dir exp/smoke_tiny_gpt2
 ```
+
+## Preset-Based Experiment
+
+Most experiment settings can be stored in `configs/strategy/*.yaml`. For example,
+`configs/strategy/gpt2_loss_delta.yaml` runs the current block-skip prototype with
+loss-delta scoring:
+
+```bash
+python main.py --strategy gpt2_loss_delta
+```
+
+Each run creates a timestamped directory under `exp/runs/` unless `--output-dir`
+is provided. The run directory stores:
+
+- `resolved_config.json`: final config after YAML and CLI overrides
+- `command.txt`: exact command used for the run
+- `*_run.log`: console log copied to file
+- `block_scores.csv` / `block_scores.json`: block score and selected block records
+- `timing_trace.json`: per-stage elapsed time
+- `memory_trace.json`: per-stage CUDA memory trace
+- `result.json`: summary metrics, selected blocks, preservation metrics, and paths
+- `pruned_model/amcprune_pruning_config.json`: base model and pruning mask config
+
+CLI arguments override YAML values when explicitly provided, so short commands can
+use presets while still allowing quick ablations such as:
+
+```bash
+python main.py --strategy gpt2_loss_delta --pruning-ratio 0.2 --seed 123
+```

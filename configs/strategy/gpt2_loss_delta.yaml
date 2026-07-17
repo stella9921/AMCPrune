@@ -1,0 +1,16 @@
+strategy: gpt2_loss_delta
+model: gpt2
+dataset: wikitext
+dataset_config: wikitext-2-raw-v1
+split: test
+max_samples: 128
+seq_len: 256
+batch_size: 1
+dtype: auto
+pruning_ratio: 0.1
+score: loss_delta
+score_max_batches: 8
+preservation_max_batches: 8
+export_pruned_model: true
+seed: 42
+output_root: exp/runs
