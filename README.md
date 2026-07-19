@@ -18,6 +18,17 @@ tokens, and split them into fixed-length `block_size` chunks for causal LM loss.
 The first prototype intentionally keeps the scoring simple so that the LLM
 pruning pipeline can run end to end before adding Fisher/Hessian refinement.
 
+Selected transformer blocks are physically removed before the pruned
+perplexity evaluation. AMCPrune updates the model layer count and reindexes
+attention layers so that an exported Llama-family model can be loaded again
+with `from_pretrained()`.
+
+For the initial TinyLlama target:
+
+```bash
+python main.py --strategy tinyllama_activation_weight
+```
+
 ## Smoke Test
 
 ```bash

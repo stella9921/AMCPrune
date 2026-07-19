@@ -1,4 +1,5 @@
 import argparse
+import gc
 import json
 import os
 from contextlib import contextmanager
@@ -21,13 +22,14 @@ from amcprune.importance_scores import AMCImportanceScores
 from amcprune.metrics import (
     MemoryTrace,
     cuda_memory_mb,
+    model_parameter_count,
     model_parameter_memory_mb,
     reset_cuda_peak,
     save_json,
 )
 from amcprune.models import get_transformer_blocks, load_causal_lm
 from amcprune.pruning import (
-    apply_block_skip,
+    remove_transformer_blocks,
     select_blocks,
     select_blocks_from_ranking,
     temporary_block_skip,
@@ -325,6 +327,9 @@ def main():
         save_pruning_plan_units_csv(os.path.join(output_dir, "pruning_plan_units.csv"), pruning_plan)
         print_pruning_plan(pruning_plan)
 
+        dense_parameter_count = model_parameter_count(model)
+        dense_parameter_memory_mb = model_parameter_memory_mb(model)
+
         with timing_trace.stage("baseline_eval"):
             baseline = evaluate_perplexity(
                 model,
@@ -333,16 +338,6 @@ def main():
                 batch_size=int(config["batch_size"]),
             )
         memory_trace.record("baseline_eval")
-
-        with timing_trace.stage("pruned_eval"):
-            with temporary_block_skip(model, blocks, block_path, selected_blocks):
-                pruned = evaluate_perplexity(
-                    model,
-                    dataset,
-                    device=device,
-                    batch_size=int(config["batch_size"]),
-                )
-        memory_trace.record("pruned_eval")
 
         with timing_trace.stage("preservation_eval"):
             preservation = evaluate_preservation(
@@ -360,6 +355,34 @@ def main():
             )
         memory_trace.record("preservation_eval")
 
+        with timing_trace.stage("physical_pruning"):
+            physical_pruning = remove_transformer_blocks(
+                model,
+                block_path,
+                selected_blocks,
+            )
+            del blocks
+            gc.collect()
+            if device.type == "cuda":
+                import torch
+                torch.cuda.empty_cache()
+        memory_trace.record("physical_pruning")
+
+        pruned_parameter_count = model_parameter_count(model)
+        pruned_parameter_memory_mb = model_parameter_memory_mb(model)
+        parameter_sparsity = 1.0 - (
+            pruned_parameter_count / max(dense_parameter_count, 1)
+        )
+
+        with timing_trace.stage("pruned_eval"):
+            pruned = evaluate_perplexity(
+                model,
+                dataset,
+                device=device,
+                batch_size=int(config["batch_size"]),
+            )
+        memory_trace.record("pruned_eval")
+
         result = {
             "run_id": run_id,
             "config": config,
@@ -367,7 +390,7 @@ def main():
             "dataset": config["dataset"],
             "dataset_config": config["dataset_config"],
             "split": config["split"],
-            "num_blocks": len(blocks),
+            "num_blocks": physical_pruning["original_num_blocks"],
             "block_path": block_path,
             "pruning_unit": "block_skip",
             "pruning_ratio": float(config["pruning_ratio"]),
@@ -378,7 +401,16 @@ def main():
             "block_scores": score_rows,
             "pruning_plan": pruning_plan,
             "selected_blocks": selected_blocks,
-            "parameter_memory_mb": model_parameter_memory_mb(model),
+            "physical_pruning": physical_pruning,
+            "dense_parameter_count": dense_parameter_count,
+            "pruned_parameter_count": pruned_parameter_count,
+            "removed_parameter_count": dense_parameter_count - pruned_parameter_count,
+            "parameter_sparsity": parameter_sparsity,
+            "dense_parameter_memory_mb": dense_parameter_memory_mb,
+            "pruned_parameter_memory_mb": pruned_parameter_memory_mb,
+            "parameter_memory_reduction_mb": (
+                dense_parameter_memory_mb - pruned_parameter_memory_mb
+            ),
             "baseline": baseline,
             "pruned": pruned,
             "preservation": preservation,
@@ -392,7 +424,6 @@ def main():
         if config.get("export_pruned_model"):
             with timing_trace.stage("export_pruned_model"):
                 export_dir = os.path.join(output_dir, "pruned_model")
-                apply_block_skip(model, block_path, selected_blocks)
                 model.save_pretrained(export_dir)
                 tokenizer.save_pretrained(export_dir)
                 save_json(export_dir, "amcprune_pruning_config.json", {
@@ -400,6 +431,8 @@ def main():
                     "pruning_unit": "block_skip",
                     "block_path": block_path,
                     "selected_blocks": selected_blocks,
+                    "physical_pruning": physical_pruning,
+                    "remaining_num_blocks": physical_pruning["remaining_num_blocks"],
                     "selected_unit_names": [
                         unit["unit_name"] for unit in pruning_plan["units"] if unit["selected"]
                     ],
@@ -432,9 +465,18 @@ def main():
         save_json_file(os.path.join(output_dir, "plots.json"), plot_paths)
 
         print(f"[AMCPrune] model={config['model']}")
-        print(f"[AMCPrune] blocks={len(blocks)} path={block_path}")
+        print(
+            f"[AMCPrune] blocks={physical_pruning['original_num_blocks']} "
+            f"path={block_path}"
+        )
         print_score_rows(config, score_rows, selected_blocks)
         print(f"[AMCPrune] selected_blocks={selected_blocks}")
+        print(
+            f"[AMCPrune] physical_blocks="
+            f"{physical_pruning['original_num_blocks']}->"
+            f"{physical_pruning['remaining_num_blocks']} "
+            f"parameter_sparsity={parameter_sparsity:.6f}"
+        )
         print(f"[AMCPrune] baseline_ppl={baseline['perplexity']:.4f}")
         print(f"[AMCPrune] pruned_ppl={pruned['perplexity']:.4f}")
         print(

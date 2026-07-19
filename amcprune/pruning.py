@@ -53,6 +53,75 @@ def apply_block_skip(model, block_path, selected_indices):
     return model
 
 
+def _resolve_block_container(model, block_path):
+    parent = model
+    parts = block_path.split(".")
+    for part in parts[:-1]:
+        parent = getattr(parent, part)
+    return parent, parts[-1], getattr(parent, parts[-1])
+
+
+def _set_num_hidden_layers(model, num_layers):
+    updated = []
+    configs = [getattr(model, "config", None)]
+    model_config = getattr(model, "config", None)
+    if model_config is not None:
+        configs.append(getattr(model_config, "text_config", None))
+    for config in configs:
+        if config is not None and hasattr(config, "num_hidden_layers"):
+            config.num_hidden_layers = num_layers
+            updated.append(type(config).__name__)
+    return updated
+
+
+def _renumber_layer_indices(blocks):
+    updated = []
+    for new_index, block in enumerate(blocks):
+        for module_name, module in block.named_modules():
+            if hasattr(module, "layer_idx"):
+                module.layer_idx = new_index
+                updated.append(
+                    f"{new_index}:{module_name or type(module).__name__}"
+                )
+    return updated
+
+
+def remove_transformer_blocks(model, block_path, selected_indices):
+    """Permanently remove transformer blocks and repair model topology metadata."""
+    parent, attr, original = _resolve_block_container(model, block_path)
+    num_blocks = len(original)
+    selected = sorted(set(int(index) for index in selected_indices))
+    invalid = [index for index in selected if index < 0 or index >= num_blocks]
+    if invalid:
+        raise IndexError(
+            f"Block indices out of range for {block_path} ({num_blocks} blocks): {invalid}"
+        )
+    if len(selected) >= num_blocks:
+        raise ValueError("Physical pruning must keep at least one transformer block.")
+
+    selected_set = set(selected)
+    kept_indices = [index for index in range(num_blocks) if index not in selected_set]
+    kept_blocks = [original[index] for index in kept_indices]
+    if isinstance(original, nn.ModuleList):
+        new_container = nn.ModuleList(kept_blocks)
+    else:
+        new_container = original.__class__(kept_blocks)
+    setattr(parent, attr, new_container)
+
+    layer_indices_updated = _renumber_layer_indices(new_container)
+    configs_updated = _set_num_hidden_layers(model, len(new_container))
+    return {
+        "block_path": block_path,
+        "original_num_blocks": num_blocks,
+        "pruned_num_blocks": len(selected),
+        "remaining_num_blocks": len(new_container),
+        "removed_original_indices": selected,
+        "kept_original_indices": kept_indices,
+        "configs_updated": configs_updated,
+        "layer_indices_updated": layer_indices_updated,
+    }
+
+
 @contextmanager
 def temporary_block_skip(model, blocks, block_path, selected_indices):
     parent = model

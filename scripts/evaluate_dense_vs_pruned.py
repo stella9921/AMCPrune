@@ -10,12 +10,12 @@ if ROOT_DIR not in sys.path:
 import torch
 
 from amcprune.models import get_transformer_blocks, load_causal_lm
-from amcprune.pruning import apply_block_skip
+from amcprune.pruning import remove_transformer_blocks
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Compare dense and AMCPrune block-skip models with lm-evaluation-harness."
+        description="Compare dense and physically pruned AMCPrune models with lm-evaluation-harness."
     )
     parser.add_argument("--pruning-config", required=True)
     parser.add_argument("--model", default=None)
@@ -131,7 +131,7 @@ def main():
     )
     _, detected_block_path = get_transformer_blocks(pruned_model)
     block_path = pruning_config.get("block_path", detected_block_path)
-    apply_block_skip(pruned_model, block_path, selected_blocks)
+    remove_transformer_blocks(pruned_model, block_path, selected_blocks)
     pruned_model.eval()
     print(f"[AMCPrune benchmark] pruned selected_blocks={selected_blocks}")
     pruned_results = run_lm_eval(

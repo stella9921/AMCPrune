@@ -17,6 +17,10 @@ def model_parameter_memory_mb(model):
     ) / 1024**2
 
 
+def model_parameter_count(model):
+    return sum(parameter.numel() for parameter in model.parameters())
+
+
 def cuda_memory_mb():
     if not torch.cuda.is_available():
         return {

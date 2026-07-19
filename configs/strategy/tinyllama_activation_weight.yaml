@@ -1,0 +1,17 @@
+strategy: tinyllama_activation_weight
+model: TinyLlama/TinyLlama-1.1B-Chat-v1.0
+dataset: wikitext
+dataset_config: wikitext-2-raw-v1
+split: test
+max_samples: 128
+seq_len: 256
+batch_size: 1
+dtype: fp16
+pruning_ratio: 0.1
+score: activation_weight
+score_cache: null
+score_max_batches: 8
+preservation_max_batches: 8
+export_pruned_model: true
+seed: 42
+output_root: exp/runs
