@@ -85,6 +85,7 @@ def plot_run_artifacts(
     preservation,
     memory_trace,
     timing_trace,
+    unit_inventory=None,
 ):
     plot_dir = _ensure_dir(os.path.join(output_dir, "plots"))
     saved = []
@@ -176,4 +177,27 @@ def plot_run_artifacts(
             "seconds",
         ))
 
+    if unit_inventory:
+        unit_labels = [str(row["block"]) for row in unit_inventory]
+        unit_selected = [index for index, row in enumerate(unit_inventory) if row.get("selected_block")]
+        metric_specs = [
+            ("num_attention_heads", "Attention heads by block", "heads"),
+            ("ffn_intermediate_dim", "FFN intermediate dim by block", "neurons"),
+            ("attention_params", "Attention params by block", "parameters"),
+            ("mlp_params", "MLP params by block", "parameters"),
+            ("block_params", "Total block params", "parameters"),
+        ]
+        for key, title, ylabel in metric_specs:
+            values = [row.get(key) for row in unit_inventory]
+            if any(value is not None for value in values):
+                saved.append(_save_bar_plot(
+                    os.path.join(plot_dir, f"{run_id}__unit_{key}.png"),
+                    unit_labels,
+                    [float(value or 0.0) for value in values],
+                    title,
+                    ylabel,
+                    unit_selected,
+                ))
+
     return [path for path in saved if path]
+

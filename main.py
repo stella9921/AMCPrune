@@ -41,6 +41,7 @@ from amcprune.scoring import (
     score_blocks_by_loss_delta,
 )
 from amcprune.visualization import plot_run_artifacts
+from amcprune.units import inspect_block_units, save_unit_inventory_csv
 
 
 DEFAULT_CONFIG = {
@@ -287,7 +288,7 @@ def main():
             model_name=config["model"],
             block_path=block_path,
             num_blocks=len(blocks),
-            pruning_unit="block_skip",
+            pruning_unit="transformer_block",
             pruning_ratio=float(config["pruning_ratio"]),
             score_name=config["score"],
             score_rows=score_rows,
@@ -325,6 +326,10 @@ def main():
             print(f"[Scores] saved importance scores: {importance_scores_path}")
         save_json_file(os.path.join(output_dir, "pruning_plan.json"), pruning_plan)
         save_pruning_plan_units_csv(os.path.join(output_dir, "pruning_plan_units.csv"), pruning_plan)
+        unit_inventory = inspect_block_units(blocks, block_path, selected_blocks)
+        save_json_file(os.path.join(output_dir, "unit_inventory.json"), unit_inventory)
+        save_unit_inventory_csv(os.path.join(output_dir, "unit_inventory.csv"), unit_inventory)
+        print(f"[Unit Inventory] saved {len(unit_inventory)} block unit records")
         print_pruning_plan(pruning_plan)
 
         dense_parameter_count = model_parameter_count(model)
@@ -392,7 +397,7 @@ def main():
             "split": config["split"],
             "num_blocks": physical_pruning["original_num_blocks"],
             "block_path": block_path,
-            "pruning_unit": "block_skip",
+            "pruning_unit": "transformer_block",
             "pruning_ratio": float(config["pruning_ratio"]),
             "score": config["score"],
             "score_cache": config.get("score_cache"),
@@ -401,6 +406,7 @@ def main():
             "block_scores": score_rows,
             "pruning_plan": pruning_plan,
             "selected_blocks": selected_blocks,
+            "unit_inventory": unit_inventory,
             "physical_pruning": physical_pruning,
             "dense_parameter_count": dense_parameter_count,
             "pruned_parameter_count": pruned_parameter_count,
@@ -428,7 +434,7 @@ def main():
                 tokenizer.save_pretrained(export_dir)
                 save_json(export_dir, "amcprune_pruning_config.json", {
                     "base_model": config["model"],
-                    "pruning_unit": "block_skip",
+                    "pruning_unit": "transformer_block",
                     "block_path": block_path,
                     "selected_blocks": selected_blocks,
                     "physical_pruning": physical_pruning,
@@ -457,6 +463,7 @@ def main():
             preservation=preservation,
             memory_trace=memory_trace.rows,
             timing_trace=timing_trace.rows,
+            unit_inventory=unit_inventory,
         )
         result["plots"] = plot_paths
         path = save_json(output_dir, "result.json", result)
@@ -509,7 +516,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
