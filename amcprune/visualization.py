@@ -86,6 +86,7 @@ def plot_run_artifacts(
     memory_trace,
     timing_trace,
     unit_inventory=None,
+    outlier_metrics=None,
 ):
     plot_dir = _ensure_dir(os.path.join(output_dir, "plots"))
     saved = []
@@ -199,5 +200,25 @@ def plot_run_artifacts(
                     unit_selected,
                 ))
 
+    if outlier_metrics:
+        outlier_labels = [str(row["block"]) for row in outlier_metrics]
+        outlier_selected = [index for index, row in enumerate(outlier_metrics) if row.get("selected_block")]
+        metric_specs = [
+            ("second_moment_mean", "OATS-style second moment mean by block", "E[x^2]"),
+            ("second_moment_top1pct_mean", "Top-1% second moment mean by block", "E[x^2]"),
+            ("second_moment_q99", "Second moment Q99 by block", "E[x^2]"),
+            ("outlier_ratio", "Second moment outlier ratio by block", "ratio"),
+        ]
+        for key, title, ylabel in metric_specs:
+            values = [row.get(key) for row in outlier_metrics]
+            if any(value is not None for value in values):
+                saved.append(_save_bar_plot(
+                    os.path.join(plot_dir, f"{run_id}__outlier_{key}.png"),
+                    outlier_labels,
+                    [float(value or 0.0) for value in values],
+                    title,
+                    ylabel,
+                    outlier_selected,
+                ))
     return [path for path in saved if path]
 

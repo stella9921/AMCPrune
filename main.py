@@ -28,6 +28,7 @@ from amcprune.metrics import (
     save_json,
 )
 from amcprune.models import get_transformer_blocks, load_causal_lm
+from amcprune.outliers import measure_block_outliers, save_outlier_metrics_csv
 from amcprune.pruning import (
     remove_transformer_blocks,
     select_blocks,
@@ -284,6 +285,22 @@ def main():
             )
         memory_trace.record(f"scoring_{config['score']}")
 
+        with timing_trace.stage("outlier_metrics"):
+            outlier_metrics = measure_block_outliers(
+                model=model,
+                blocks=blocks,
+                block_path=block_path,
+                dataset=dataset,
+                device=device,
+                batch_size=int(config["batch_size"]),
+                max_batches=int(config["score_max_batches"]),
+                selected_blocks=selected_blocks,
+            )
+        memory_trace.record("outlier_metrics")
+        save_json_file(os.path.join(output_dir, "outlier_metrics.json"), outlier_metrics)
+        save_outlier_metrics_csv(os.path.join(output_dir, "outlier_metrics.csv"), outlier_metrics)
+        print(f"[Outlier Metrics] saved {len(outlier_metrics)} block records")
+
         pruning_plan = build_pruning_plan(
             model_name=config["model"],
             block_path=block_path,
@@ -407,6 +424,7 @@ def main():
             "pruning_plan": pruning_plan,
             "selected_blocks": selected_blocks,
             "unit_inventory": unit_inventory,
+            "outlier_metrics": outlier_metrics,
             "physical_pruning": physical_pruning,
             "dense_parameter_count": dense_parameter_count,
             "pruned_parameter_count": pruned_parameter_count,
@@ -464,6 +482,7 @@ def main():
             memory_trace=memory_trace.rows,
             timing_trace=timing_trace.rows,
             unit_inventory=unit_inventory,
+            outlier_metrics=outlier_metrics,
         )
         result["plots"] = plot_paths
         path = save_json(output_dir, "result.json", result)
