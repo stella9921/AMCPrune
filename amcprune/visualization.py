@@ -73,6 +73,33 @@ def _save_metric_bar(path, metrics, title, ylabel):
     return path
 
 
+
+def _save_grouped_line_plot(path, labels, series, title, ylabel, selected=None, yscale=None):
+    plt = _try_import_matplotlib()
+    if plt is None:
+        return None
+    selected = set(selected or [])
+    fig_width = max(8, min(18, len(labels) * 0.55))
+    fig, ax = plt.subplots(figsize=(fig_width, 4.8))
+    x_values = list(range(len(labels)))
+    for name, values in series.items():
+        ax.plot(x_values, values, marker="o", linewidth=1.8, label=name)
+    for index in selected:
+        ax.axvspan(index - 0.45, index + 0.45, color="tab:red", alpha=0.10)
+    ax.set_title(title)
+    ax.set_ylabel(ylabel)
+    ax.set_xlabel("Block index")
+    ax.set_xticks(x_values)
+    ax.set_xticklabels(labels, rotation=45, ha="right")
+    if yscale:
+        ax.set_yscale(yscale)
+    ax.grid(True, linestyle="--", alpha=0.35)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+    return path
+
 def plot_run_artifacts(
     *,
     output_dir,
@@ -220,5 +247,46 @@ def plot_run_artifacts(
                     ylabel,
                     outlier_selected,
                 ))
+
+        saved.append(_save_grouped_line_plot(
+            os.path.join(plot_dir, f"{run_id}__outlier_second_moment_profile.png"),
+            outlier_labels,
+            {
+                "mean": [float(row.get("second_moment_mean") or 0.0) for row in outlier_metrics],
+                "Q95": [float(row.get("second_moment_q95") or 0.0) for row in outlier_metrics],
+                "Q99": [float(row.get("second_moment_q99") or 0.0) for row in outlier_metrics],
+                "max": [float(row.get("second_moment_max") or 0.0) for row in outlier_metrics],
+            },
+            "Second moment outlier profile by block",
+            "E[x^2]",
+            outlier_selected,
+            yscale="log",
+        ))
+
+        eps = 1e-12
+        saved.append(_save_grouped_line_plot(
+            os.path.join(plot_dir, f"{run_id}__outlier_amplification_ratio.png"),
+            outlier_labels,
+            {
+                "Q99/mean": [
+                    float(row.get("second_moment_q99") or 0.0) /
+                    max(float(row.get("second_moment_mean") or 0.0), eps)
+                    for row in outlier_metrics
+                ],
+                "max/mean": [
+                    float(row.get("second_moment_max") or 0.0) /
+                    max(float(row.get("second_moment_mean") or 0.0), eps)
+                    for row in outlier_metrics
+                ],
+                "top1%/mean": [
+                    float(row.get("second_moment_top1pct_mean") or 0.0) /
+                    max(float(row.get("second_moment_mean") or 0.0), eps)
+                    for row in outlier_metrics
+                ],
+            },
+            "Activation outlier amplification by block",
+            "ratio to mean",
+            outlier_selected,
+        ))
     return [path for path in saved if path]
 
