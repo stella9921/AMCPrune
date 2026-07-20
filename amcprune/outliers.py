@@ -3,18 +3,18 @@ import math
 import os
 
 import torch
+from torch.utils.data import DataLoader
 
 
 @torch.no_grad()
 def _iter_batches(dataset, batch_size, device, max_batches):
-    total = len(dataset["input_ids"])
-    limit = total if max_batches is None else min(total, max_batches * batch_size)
-    for start in range(0, limit, batch_size):
-        end = min(start + batch_size, limit)
+    loader = DataLoader(dataset, batch_size=batch_size)
+    for step, (input_ids, attention_mask) in enumerate(loader):
+        if max_batches is not None and step >= max_batches:
+            break
         yield {
-            "input_ids": dataset["input_ids"][start:end].to(device),
-            "attention_mask": dataset["attention_mask"][start:end].to(device),
-            "labels": dataset["labels"][start:end].to(device),
+            "input_ids": input_ids.to(device),
+            "attention_mask": attention_mask.to(device),
         }
 
 
