@@ -73,6 +73,23 @@ def _set_num_hidden_layers(model, num_layers):
             updated.append(type(config).__name__)
     return updated
 
+def _repair_per_layer_config_lists(model, kept_indices, original_num_blocks):
+    updated = []
+    configs = [getattr(model, "config", None)]
+    model_config = getattr(model, "config", None)
+    if model_config is not None:
+        configs.append(getattr(model_config, "text_config", None))
+    seen = set()
+    for config in configs:
+        if config is None or id(config) in seen:
+            continue
+        seen.add(id(config))
+        for name, value in list(vars(config).items()):
+            if isinstance(value, list) and len(value) == original_num_blocks:
+                setattr(config, name, [value[index] for index in kept_indices])
+                updated.append(f"{type(config).__name__}.{name}")
+    return updated
+
 
 def _renumber_layer_indices(blocks):
     updated = []
@@ -110,6 +127,9 @@ def remove_transformer_blocks(model, block_path, selected_indices):
 
     layer_indices_updated = _renumber_layer_indices(new_container)
     configs_updated = _set_num_hidden_layers(model, len(new_container))
+    per_layer_configs_updated = _repair_per_layer_config_lists(
+        model, kept_indices, num_blocks
+    )
     return {
         "block_path": block_path,
         "original_num_blocks": num_blocks,
@@ -118,6 +138,7 @@ def remove_transformer_blocks(model, block_path, selected_indices):
         "removed_original_indices": selected,
         "kept_original_indices": kept_indices,
         "configs_updated": configs_updated,
+        "per_layer_configs_updated": per_layer_configs_updated,
         "layer_indices_updated": layer_indices_updated,
     }
 
