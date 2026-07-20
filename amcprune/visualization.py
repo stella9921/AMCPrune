@@ -114,6 +114,7 @@ def plot_run_artifacts(
     timing_trace,
     unit_inventory=None,
     outlier_metrics=None,
+    inference_metrics=None,
 ):
     plot_dir = _ensure_dir(os.path.join(output_dir, "plots"))
     saved = []
@@ -226,6 +227,37 @@ def plot_run_artifacts(
                     ylabel,
                     unit_selected,
                 ))
+
+    if inference_metrics:
+        dense_inference = inference_metrics.get("dense", {})
+        pruned_inference = inference_metrics.get("pruned", {})
+        saved.append(_save_metric_bar(
+            os.path.join(plot_dir, f"{run_id}__inference_ttft.png"),
+            {
+                "dense": float(dense_inference.get("ttft_seconds") or 0.0),
+                "pruned": float(pruned_inference.get("ttft_seconds") or 0.0),
+            },
+            "Time to first token",
+            "seconds",
+        ))
+        saved.append(_save_metric_bar(
+            os.path.join(plot_dir, f"{run_id}__inference_tps.png"),
+            {
+                "dense": float(dense_inference.get("tokens_per_second") or 0.0),
+                "pruned": float(pruned_inference.get("tokens_per_second") or 0.0),
+            },
+            "Generation throughput",
+            "tokens/sec",
+        ))
+        saved.append(_save_metric_bar(
+            os.path.join(plot_dir, f"{run_id}__inference_peak_vram.png"),
+            {
+                "dense": float(dense_inference.get("peak_vram_mb") or 0.0),
+                "pruned": float(pruned_inference.get("peak_vram_mb") or 0.0),
+            },
+            "Inference peak VRAM",
+            "MB",
+        ))
 
     if outlier_metrics:
         outlier_labels = [str(row["block"]) for row in outlier_metrics]

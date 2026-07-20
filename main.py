@@ -5,7 +5,7 @@ import os
 from contextlib import contextmanager
 
 from amcprune.data import load_tokenized_text_dataset
-from amcprune.evaluate import evaluate_perplexity, evaluate_preservation
+from amcprune.evaluate import benchmark_generation, evaluate_perplexity, evaluate_preservation
 from amcprune.experiment import (
     TeeLogger,
     TimingTrace,
@@ -59,6 +59,8 @@ DEFAULT_CONFIG = {
     "score_cache": None,
     "score_max_batches": 8,
     "preservation_max_batches": 8,
+    "inference_prompt": "The future of artificial intelligence is",
+    "inference_max_new_tokens": 32,
     "export_pruned_model": False,
     "output_root": "exp/runs",
     "output_dir": None,
@@ -98,6 +100,8 @@ def parse_args():
     parser.add_argument("--output-dir", dest="output_dir", default=None)
     parser.add_argument("--run-name", dest="run_name", default=None)
     parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--inference-prompt", dest="inference_prompt", default=None)
+    parser.add_argument("--inference-max-new-tokens", dest="inference_max_new_tokens", type=int, default=None)
     return parser.parse_args()
 
 
@@ -377,6 +381,16 @@ def main():
             )
         memory_trace.record("preservation_eval")
 
+        with timing_trace.stage("dense_inference_benchmark"):
+            dense_inference = benchmark_generation(
+                model=model,
+                tokenizer=tokenizer,
+                device=device,
+                prompt=config["inference_prompt"],
+                max_new_tokens=int(config["inference_max_new_tokens"]),
+            )
+        memory_trace.record("dense_inference_benchmark")
+
         with timing_trace.stage("physical_pruning"):
             physical_pruning = remove_transformer_blocks(
                 model,
@@ -404,6 +418,16 @@ def main():
                 batch_size=int(config["batch_size"]),
             )
         memory_trace.record("pruned_eval")
+
+        with timing_trace.stage("pruned_inference_benchmark"):
+            pruned_inference = benchmark_generation(
+                model=model,
+                tokenizer=tokenizer,
+                device=device,
+                prompt=config["inference_prompt"],
+                max_new_tokens=int(config["inference_max_new_tokens"]),
+            )
+        memory_trace.record("pruned_inference_benchmark")
 
         result = {
             "run_id": run_id,
@@ -438,6 +462,13 @@ def main():
             "baseline": baseline,
             "pruned": pruned,
             "preservation": preservation,
+            "inference": {
+                "dense": dense_inference,
+                "pruned": pruned_inference,
+                "ttft_delta_seconds": pruned_inference["ttft_seconds"] - dense_inference["ttft_seconds"],
+                "tps_delta": pruned_inference["tokens_per_second"] - dense_inference["tokens_per_second"],
+                "peak_vram_delta_mb": pruned_inference["peak_vram_mb"] - dense_inference["peak_vram_mb"],
+            },
             "perplexity_delta": pruned["perplexity"] - baseline["perplexity"],
             "memory_trace": memory_trace.rows,
             "timing_trace": timing_trace.rows,
@@ -483,11 +514,13 @@ def main():
             timing_trace=timing_trace.rows,
             unit_inventory=unit_inventory,
             outlier_metrics=outlier_metrics,
+            inference_metrics=result["inference"],
         )
         result["plots"] = plot_paths
         path = save_json(output_dir, "result.json", result)
         save_json_file(os.path.join(output_dir, "timing_trace.json"), timing_trace.rows)
         save_json_file(os.path.join(output_dir, "memory_trace.json"), memory_trace.rows)
+        save_json_file(os.path.join(output_dir, "inference_metrics.json"), result["inference"])
         save_json_file(os.path.join(output_dir, "plots.json"), plot_paths)
 
         print(f"[AMCPrune] model={config['model']}")
@@ -512,6 +545,17 @@ def main():
         )
         if export_dir:
             print(f"[AMCPrune] exported_pruned_model={export_dir}")
+        print("[AMCPrune] inference benchmark:")
+        print(
+            f"  dense: ttft={dense_inference['ttft_seconds']:.4f}s "
+            f"tps={dense_inference['tokens_per_second']:.2f} "
+            f"peak_vram={dense_inference['peak_vram_mb']:.2f}MB"
+        )
+        print(
+            f"  pruned: ttft={pruned_inference['ttft_seconds']:.4f}s "
+            f"tps={pruned_inference['tokens_per_second']:.2f} "
+            f"peak_vram={pruned_inference['peak_vram_mb']:.2f}MB"
+        )
         print("[AMCPrune] memory trace:")
         for row in memory_trace.rows:
             print(

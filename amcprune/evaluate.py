@@ -1,4 +1,5 @@
 import math
+import time
 
 import torch
 import torch.nn.functional as F
@@ -92,4 +93,73 @@ def evaluate_preservation(
         "hidden_cosine_similarity": hidden_cosine_sum / max(batches, 1),
         "logit_kl_divergence": logit_kl_sum / max(batches, 1),
         "batches": batches,
+    }
+
+
+@torch.no_grad()
+def benchmark_generation(
+    model,
+    tokenizer,
+    device,
+    prompt="The future of artificial intelligence is",
+    max_new_tokens=32,
+):
+    """Measure simple LLM inference latency metrics.
+
+    TTFT is measured with one-token generation. TPS is measured with a fixed
+    max_new_tokens generation and reported as generated tokens per second.
+    """
+    model.eval()
+    encoded = tokenizer(prompt, return_tensors="pt")
+    encoded = {key: value.to(device) for key, value in encoded.items()}
+    input_tokens = int(encoded["input_ids"].shape[-1])
+
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats(device)
+    start = time.perf_counter()
+    model.generate(
+        **encoded,
+        max_new_tokens=1,
+        do_sample=False,
+        use_cache=True,
+        pad_token_id=tokenizer.eos_token_id,
+    )
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    ttft_seconds = time.perf_counter() - start
+
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats(device)
+    start = time.perf_counter()
+    generated = model.generate(
+        **encoded,
+        max_new_tokens=int(max_new_tokens),
+        do_sample=False,
+        use_cache=True,
+        pad_token_id=tokenizer.eos_token_id,
+    )
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    end_to_end_seconds = time.perf_counter() - start
+    generated_tokens = max(int(generated.shape[-1]) - input_tokens, 0)
+    tokens_per_second = generated_tokens / max(end_to_end_seconds, 1e-12)
+    decode_seconds_after_first = max(end_to_end_seconds - ttft_seconds, 0.0)
+    decode_tokens_after_first = max(generated_tokens - 1, 0)
+    decode_tokens_per_second = decode_tokens_after_first / max(decode_seconds_after_first, 1e-12)
+
+    peak_vram_mb = 0.0
+    if torch.cuda.is_available():
+        peak_vram_mb = torch.cuda.max_memory_allocated(device) / 1024**2
+
+    return {
+        "prompt": prompt,
+        "input_tokens": input_tokens,
+        "generated_tokens": generated_tokens,
+        "ttft_seconds": ttft_seconds,
+        "end_to_end_seconds": end_to_end_seconds,
+        "tokens_per_second": tokens_per_second,
+        "decode_seconds_after_first": decode_seconds_after_first,
+        "decode_tokens_per_second_after_first": decode_tokens_per_second,
+        "peak_vram_mb": peak_vram_mb,
     }
