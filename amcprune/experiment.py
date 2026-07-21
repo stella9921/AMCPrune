@@ -233,3 +233,54 @@ def save_pruning_plan_units_csv(path, pruning_plan):
         for unit in pruning_plan["units"]:
             writer.writerow({key: unit.get(key) for key in fieldnames})
     return path
+
+
+def save_unit_decision_log(path, unit_plan):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    units = unit_plan.get("units", [])
+    selected = [unit for unit in units if unit.get("selected")]
+    with open(path, "w", encoding="utf-8") as stream:
+        stream.write("[Unit Objective Summary]\n")
+        stream.write(f"objective={unit_plan.get('objective')}\n")
+        stream.write(f"total_units={unit_plan.get('total_units')}\n")
+        stream.write(f"selected_units={unit_plan.get('selected_units')}\n")
+        stream.write(f"target_pruning_ratio={unit_plan.get('pruning_ratio_target')}\n")
+        stream.write(f"actual_unit_pruning_ratio={unit_plan.get('actual_unit_pruning_ratio')}\n")
+        stream.write(f"actual_memory_pruning_ratio={unit_plan.get('actual_memory_pruning_ratio')}\n")
+        stream.write(f"selected_memory_cost={unit_plan.get('selected_memory_cost')}\n")
+        stream.write(f"total_memory_cost={unit_plan.get('total_memory_cost')}\n")
+        stream.write("\n[Selected Units]\n")
+        for unit in selected:
+            stream.write(
+                "SELECT "
+                f"block={unit.get('block')} "
+                f"type={unit.get('unit_type')} "
+                f"idx={unit.get('unit_index')} "
+                f"name={unit.get('unit_name')} "
+                f"sensitivity={unit.get('sensitivity_score')} "
+                f"outlier={unit.get('outlier_risk')} "
+                f"memory_cost={unit.get('memory_cost')} "
+                f"keep_score={unit.get('keep_score')} "
+                f"objective={unit.get('objective_score')} "
+                f"reason={unit.get('reason')}\n"
+            )
+        stream.write("\n[All Candidate Units]\n")
+        for unit in units:
+            marker = "PRUNE" if unit.get("selected") else "KEEP"
+            stream.write(
+                f"{marker} "
+                f"block={unit.get('block')} "
+                f"type={unit.get('unit_type')} "
+                f"idx={unit.get('unit_index')} "
+                f"name={unit.get('unit_name')} "
+                f"hessian={unit.get('hessian_score')} "
+                f"sensitivity={unit.get('sensitivity_score')} "
+                f"sensitivity_norm={unit.get('sensitivity_score_normalized')} "
+                f"outlier={unit.get('outlier_risk')} "
+                f"outlier_norm={unit.get('outlier_risk_normalized')} "
+                f"memory_cost={unit.get('memory_cost')} "
+                f"memory_norm={unit.get('memory_cost_normalized')} "
+                f"keep_score={unit.get('keep_score')} "
+                f"objective={unit.get('objective_score')}\n"
+            )
+    return path

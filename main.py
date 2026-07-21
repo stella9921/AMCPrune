@@ -16,6 +16,7 @@ from amcprune.experiment import (
     save_command,
     save_json as save_json_file,
     save_pruning_plan_units_csv,
+    save_unit_decision_log,
     set_seed,
 )
 from amcprune.importance_scores import AMCImportanceScores
@@ -29,6 +30,7 @@ from amcprune.metrics import (
 )
 from amcprune.models import get_transformer_blocks, load_causal_lm
 from amcprune.outliers import measure_block_outliers, save_outlier_metrics_csv
+from amcprune.objective import apply_outlier_aware_objective, build_unit_objective_plan
 from amcprune.pruning import (
     remove_transformer_blocks,
     select_blocks,
@@ -39,8 +41,11 @@ from amcprune.scoring import (
     rank_blocks_by_scores,
     score_blocks_by_activation,
     score_blocks_by_activation_weight,
+    score_blocks_by_hidden_cosine,
     score_blocks_by_loss_delta,
 )
+from amcprune.unit_pruning import apply_unit_mask_pruning, apply_unit_physical_pruning
+from amcprune.unit_scoring import score_candidate_units_by_hessian_proxy, save_unit_scores_csv
 from amcprune.visualization import plot_run_artifacts
 from amcprune.units import inspect_block_units, save_unit_inventory_csv
 
@@ -58,6 +63,15 @@ DEFAULT_CONFIG = {
     "score": "block_index",
     "score_cache": None,
     "score_max_batches": 8,
+    "selection_objective": "score",
+    "outlier_metric": "outlier_ratio",
+    "outlier_weight": 0.25,
+    "pruning_mode": "block",
+    "unit_score": "none",
+    "unit_pruning_ratio": 0.1,
+    "unit_score_max_batches": 4,
+    "unit_hvp_k_horizon": 1,
+    "memory_weight": 0.25,
     "preservation_max_batches": 8,
     "inference_prompt": "The future of artificial intelligence is",
     "inference_max_new_tokens": 32,
@@ -83,11 +97,37 @@ def parse_args():
     parser.add_argument("--pruning-ratio", dest="pruning_ratio", type=float, default=None)
     parser.add_argument(
         "--score",
-        choices=["block_index", "early_block", "activation", "activation_weight", "loss_delta"],
+        choices=[
+            "block_index",
+            "early_block",
+            "activation",
+            "activation_weight",
+            "hidden_cosine",
+            "loss_delta",
+        ],
         default=None,
     )
     parser.add_argument("--score-cache", dest="score_cache", default=None)
     parser.add_argument("--score-max-batches", dest="score_max_batches", type=int, default=None)
+    parser.add_argument(
+        "--selection-objective",
+        dest="selection_objective",
+        choices=["score", "outlier_aware"],
+        default=None,
+    )
+    parser.add_argument("--outlier-metric", dest="outlier_metric", default=None)
+    parser.add_argument("--outlier-weight", dest="outlier_weight", type=float, default=None)
+    parser.add_argument(
+        "--pruning-mode",
+        dest="pruning_mode",
+        choices=["block", "unit_mask", "unit_physical"],
+        default=None,
+    )
+    parser.add_argument("--unit-score", dest="unit_score", choices=["none", "hessian_proxy", "hvp"], default=None)
+    parser.add_argument("--unit-pruning-ratio", dest="unit_pruning_ratio", type=float, default=None)
+    parser.add_argument("--unit-score-max-batches", dest="unit_score_max_batches", type=int, default=None)
+    parser.add_argument("--unit-hvp-k-horizon", dest="unit_hvp_k_horizon", type=int, default=None)
+    parser.add_argument("--memory-weight", dest="memory_weight", type=float, default=None)
     parser.add_argument(
         "--preservation-max-batches",
         dest="preservation_max_batches",
@@ -126,6 +166,18 @@ def print_config_summary(config):
     )
     if config.get("score_cache"):
         print(f"[Config] score_cache={config['score_cache']}")
+    print(
+        f"[Config] selection_objective={config.get('selection_objective')} "
+        f"outlier_metric={config.get('outlier_metric')} "
+        f"outlier_weight={config.get('outlier_weight')}"
+    )
+    print(
+        f"[Config] pruning_mode={config.get('pruning_mode')} "
+        f"unit_score={config.get('unit_score')} "
+        f"unit_pruning_ratio={config.get('unit_pruning_ratio')} "
+        f"unit_hvp_k_horizon={config.get('unit_hvp_k_horizon')} "
+        f"memory_weight={config.get('memory_weight')}"
+    )
 
 
 def load_score_cache(path):
@@ -163,6 +215,15 @@ def select_blocks_for_config(config, model, blocks, block_path, dataset, device)
         )
     elif config["score"] == "activation_weight":
         score_rows = score_blocks_by_activation_weight(
+            model=model,
+            blocks=blocks,
+            dataset=dataset,
+            device=device,
+            batch_size=int(config["batch_size"]),
+            max_batches=int(config["score_max_batches"]),
+        )
+    elif config["score"] == "hidden_cosine":
+        score_rows = score_blocks_by_hidden_cosine(
             model=model,
             blocks=blocks,
             dataset=dataset,
@@ -220,6 +281,13 @@ def print_score_rows(config, score_rows, selected_blocks):
                 f"loss_delta={row['loss_delta']:.6e} "
                 f"skipped_ppl={row['skipped_perplexity']:.4f}"
             )
+        elif config["score"] == "hidden_cosine":
+            print(
+                f"  {marker} block={row['block']:02d} "
+                f"hidden_cos={row['hidden_cosine_similarity']:.6f} "
+                f"repr_delta={row['representation_delta']:.6e} "
+                f"score={row['score']:.6e}"
+            )
         else:
             print(f"  {marker} block={row['block']:02d} score={row['score']:.6e}")
 
@@ -238,6 +306,37 @@ def print_pruning_plan(pruning_plan):
             f"  {marker} {unit['unit_name']} type={unit['unit_type']} "
             f"score={score_text} reason={unit['reason']}"
         )
+
+
+def print_unit_objective_plan(unit_plan, max_rows=40):
+    if not unit_plan:
+        return
+    selected = [unit for unit in unit_plan["units"] if unit.get("selected")]
+    print(
+        "[Unit Objective] "
+        f"objective={unit_plan['objective']} "
+        f"selected={unit_plan['selected_units']}/{unit_plan['total_units']} "
+        f"unit_ratio={unit_plan['actual_unit_pruning_ratio']:.4f} "
+        f"memory_ratio={unit_plan['actual_memory_pruning_ratio']:.4f}"
+    )
+    print(
+        "[Unit Objective] "
+        f"target_pruned_cost={unit_plan['target_pruned_memory_cost']:.2f} "
+        f"selected_cost={unit_plan['selected_memory_cost']:.2f} "
+        f"total_cost={unit_plan['total_memory_cost']:.2f}"
+    )
+    for unit in selected[:max_rows]:
+        print(
+            "  * "
+            f"{unit['unit_name']} type={unit['unit_type']} "
+            f"hvp={unit.get('hessian_score', 0.0):.6e} "
+            f"outlier={unit.get('outlier_risk', 0.0):.6e} "
+            f"cost={float(unit.get('memory_cost', 0.0) or 0.0):.2f} "
+            f"keep={unit.get('keep_score', 0.0):.6e} "
+            f"objective={unit.get('objective_score', 0.0):.6e}"
+        )
+    if len(selected) > max_rows:
+        print(f"  ... {len(selected) - max_rows} more selected units")
 
 
 def main():
@@ -301,6 +400,31 @@ def main():
                 selected_blocks=selected_blocks,
             )
         memory_trace.record("outlier_metrics")
+
+        if score_rows and config.get("selection_objective") == "outlier_aware":
+            with timing_trace.stage("outlier_aware_selection"):
+                score_rows = apply_outlier_aware_objective(
+                    score_rows=score_rows,
+                    outlier_rows=outlier_metrics,
+                    outlier_metric=config.get("outlier_metric", "outlier_ratio"),
+                    outlier_weight=float(config.get("outlier_weight", 0.25)),
+                )
+                selected_blocks = select_blocks_from_ranking(
+                    ranking=rank_blocks_by_scores(score_rows, descending=False),
+                    num_blocks=len(blocks),
+                    pruning_ratio=float(config["pruning_ratio"]),
+                )
+                selected_set = set(selected_blocks)
+                for row in outlier_metrics:
+                    row["selected_block"] = row["block"] in selected_set
+                print(
+                    "[Objective] outlier-aware selection active: "
+                    f"metric={config.get('outlier_metric')} "
+                    f"weight={float(config.get('outlier_weight', 0.25)):.4f} "
+                    f"selected_blocks={selected_blocks}"
+                )
+            memory_trace.record("outlier_aware_selection")
+
         save_json_file(os.path.join(output_dir, "outlier_metrics.json"), outlier_metrics)
         save_outlier_metrics_csv(os.path.join(output_dir, "outlier_metrics.csv"), outlier_metrics)
         print(f"[Outlier Metrics] saved {len(outlier_metrics)} block records")
@@ -317,6 +441,9 @@ def main():
         )
         score_json = {
             "score": config["score"],
+            "selection_objective": config.get("selection_objective"),
+            "outlier_metric": config.get("outlier_metric"),
+            "outlier_weight": config.get("outlier_weight"),
             "selected_blocks": selected_blocks,
             "rows": score_rows,
         }
@@ -337,6 +464,9 @@ def main():
                     "max_samples": config["max_samples"],
                     "seq_len": config["seq_len"],
                     "score_max_batches": config["score_max_batches"],
+                    "selection_objective": config.get("selection_objective"),
+                    "outlier_metric": config.get("outlier_metric"),
+                    "outlier_weight": config.get("outlier_weight"),
                     "seed": config.get("seed"),
                 },
             )
@@ -347,6 +477,51 @@ def main():
             print(f"[Scores] saved importance scores: {importance_scores_path}")
         save_json_file(os.path.join(output_dir, "pruning_plan.json"), pruning_plan)
         save_pruning_plan_units_csv(os.path.join(output_dir, "pruning_plan_units.csv"), pruning_plan)
+        unit_score_rows = []
+        unit_objective_plan = None
+        if config.get("unit_score") in {"hessian_proxy", "hvp"} or config.get("pruning_mode") in {"unit_mask", "unit_physical"}:
+            unit_score_method = config.get("unit_score")
+            if unit_score_method == "none":
+                unit_score_method = "hvp"
+            with timing_trace.stage(f"unit_scoring_{unit_score_method}"):
+                unit_score_rows = score_candidate_units_by_hessian_proxy(
+                    model=model,
+                    blocks=blocks,
+                    block_path=block_path,
+                    selected_blocks=selected_blocks,
+                    dataset=dataset,
+                    device=device,
+                    batch_size=int(config["batch_size"]),
+                    max_batches=int(config["unit_score_max_batches"]),
+                    method=unit_score_method,
+                    k_horizon=int(config["unit_hvp_k_horizon"]),
+                )
+            memory_trace.record(f"unit_scoring_{unit_score_method}")
+            unit_objective_plan = build_unit_objective_plan(
+                unit_rows=unit_score_rows,
+                pruning_ratio=float(config["unit_pruning_ratio"]),
+                outlier_weight=float(config["outlier_weight"]),
+                memory_weight=float(config["memory_weight"]),
+            )
+            save_json_file(os.path.join(output_dir, "unit_scores.json"), unit_score_rows)
+            save_unit_scores_csv(os.path.join(output_dir, "unit_scores.csv"), unit_score_rows)
+            save_json_file(os.path.join(output_dir, "unit_objective_plan.json"), unit_objective_plan)
+            save_unit_scores_csv(
+                os.path.join(output_dir, "unit_objective_plan.csv"),
+                unit_objective_plan["units"],
+            )
+            decision_log_path = save_unit_decision_log(
+                os.path.join(output_dir, "unit_decision_log.txt"),
+                unit_objective_plan,
+            )
+            print(
+                "[Unit Objective] "
+                f"candidates={unit_objective_plan['total_units']} "
+                f"selected={unit_objective_plan['selected_units']} "
+                f"ratio={unit_objective_plan['actual_unit_pruning_ratio']:.4f}"
+            )
+            print(f"[Unit Objective] decision log saved: {decision_log_path}")
+            print_unit_objective_plan(unit_objective_plan)
         unit_inventory = inspect_block_units(blocks, block_path, selected_blocks)
         save_json_file(os.path.join(output_dir, "unit_inventory.json"), unit_inventory)
         save_unit_inventory_csv(os.path.join(output_dir, "unit_inventory.csv"), unit_inventory)
@@ -366,19 +541,27 @@ def main():
         memory_trace.record("baseline_eval")
 
         with timing_trace.stage("preservation_eval"):
-            preservation = evaluate_preservation(
-                model,
-                dataset,
-                device=device,
-                apply_pruning=build_pruning_context(
+            if config.get("pruning_mode") == "block":
+                preservation = evaluate_preservation(
                     model,
-                    blocks,
-                    block_path,
-                    selected_blocks,
-                ),
-                batch_size=int(config["batch_size"]),
-                max_batches=int(config["preservation_max_batches"]),
-            )
+                    dataset,
+                    device=device,
+                    apply_pruning=build_pruning_context(
+                        model,
+                        blocks,
+                        block_path,
+                        selected_blocks,
+                    ),
+                    batch_size=int(config["batch_size"]),
+                    max_batches=int(config["preservation_max_batches"]),
+                )
+            else:
+                preservation = {
+                    "hidden_cosine_similarity": None,
+                    "logit_kl_divergence": None,
+                    "batches": 0,
+                    "note": "Unit-mask preservation requires a dense model copy; use pruned PPL/task metrics for this prototype.",
+                }
         memory_trace.record("preservation_eval")
 
         with timing_trace.stage("dense_inference_benchmark"):
@@ -392,12 +575,33 @@ def main():
         memory_trace.record("dense_inference_benchmark")
 
         with timing_trace.stage("physical_pruning"):
-            physical_pruning = remove_transformer_blocks(
-                model,
-                block_path,
-                selected_blocks,
-            )
-            del blocks
+            if config.get("pruning_mode") in {"unit_mask", "unit_physical"}:
+                if not unit_objective_plan:
+                    raise ValueError("unit_mask pruning requires unit_objective_plan.")
+                if config.get("pruning_mode") == "unit_physical":
+                    physical_pruning = apply_unit_physical_pruning(blocks, unit_objective_plan)
+                else:
+                    physical_pruning = apply_unit_mask_pruning(blocks, unit_objective_plan)
+                physical_pruning.update({
+                    "block_path": block_path,
+                    "original_num_blocks": len(blocks),
+                    "pruned_num_blocks": 0,
+                    "remaining_num_blocks": len(blocks),
+                    "removed_original_indices": [],
+                    "kept_original_indices": list(range(len(blocks))),
+                    "planned_memory_cost": sum(
+                        float(unit.get("memory_cost", 0.0) or 0.0)
+                        for unit in unit_objective_plan["units"]
+                        if unit.get("selected")
+                    ),
+                })
+            else:
+                physical_pruning = remove_transformer_blocks(
+                    model,
+                    block_path,
+                    selected_blocks,
+                )
+                del blocks
             gc.collect()
             if device.type == "cuda":
                 import torch
@@ -409,6 +613,20 @@ def main():
         parameter_sparsity = 1.0 - (
             pruned_parameter_count / max(dense_parameter_count, 1)
         )
+        print(
+            "[Pruning Result] "
+            f"mode={physical_pruning.get('pruning_mode')} "
+            f"dense_params={dense_parameter_count:,} "
+            f"pruned_params={pruned_parameter_count:,} "
+            f"removed_params={dense_parameter_count - pruned_parameter_count:,} "
+            f"parameter_sparsity={parameter_sparsity * 100:.2f}%"
+        )
+        if physical_pruning.get("selected_by_type"):
+            print(f"[Pruning Result] selected_by_type={physical_pruning['selected_by_type']}")
+        if physical_pruning.get("physically_pruned_by_type"):
+            print(f"[Pruning Result] physically_pruned_by_type={physical_pruning['physically_pruned_by_type']}")
+        if physical_pruning.get("masked_fallback_by_type"):
+            print(f"[Pruning Result] masked_fallback_by_type={physical_pruning['masked_fallback_by_type']}")
 
         with timing_trace.stage("pruned_eval"):
             pruned = evaluate_perplexity(
@@ -439,7 +657,10 @@ def main():
             "num_blocks": physical_pruning["original_num_blocks"],
             "block_path": block_path,
             "pruning_unit": "transformer_block",
+            "pruning_mode": config.get("pruning_mode"),
             "pruning_ratio": float(config["pruning_ratio"]),
+            "unit_score": config.get("unit_score"),
+            "unit_pruning_ratio": float(config.get("unit_pruning_ratio", 0.0)),
             "score": config["score"],
             "score_cache": config.get("score_cache"),
             "score_max_batches": int(config["score_max_batches"]),
@@ -448,6 +669,8 @@ def main():
             "pruning_plan": pruning_plan,
             "selected_blocks": selected_blocks,
             "unit_inventory": unit_inventory,
+            "unit_scores": unit_score_rows,
+            "unit_objective_plan": unit_objective_plan,
             "outlier_metrics": outlier_metrics,
             "physical_pruning": physical_pruning,
             "dense_parameter_count": dense_parameter_count,
@@ -479,13 +702,24 @@ def main():
         if config.get("export_pruned_model"):
             with timing_trace.stage("export_pruned_model"):
                 export_dir = os.path.join(output_dir, "pruned_model")
-                model.save_pretrained(export_dir)
+                os.makedirs(export_dir, exist_ok=True)
+                if config.get("pruning_mode") == "unit_physical":
+                    import torch
+                    torch.save(
+                        model.state_dict(),
+                        os.path.join(export_dir, "unit_physical_state_dict.pt"),
+                    )
+                else:
+                    model.save_pretrained(export_dir)
                 tokenizer.save_pretrained(export_dir)
                 save_json(export_dir, "amcprune_pruning_config.json", {
                     "base_model": config["model"],
                     "pruning_unit": "transformer_block",
+                    "pruning_mode": config.get("pruning_mode"),
                     "block_path": block_path,
                     "selected_blocks": selected_blocks,
+                    "unit_score": config.get("unit_score"),
+                    "unit_objective_plan": unit_objective_plan,
                     "physical_pruning": physical_pruning,
                     "remaining_num_blocks": physical_pruning["remaining_num_blocks"],
                     "selected_unit_names": [
@@ -495,6 +729,12 @@ def main():
                     "score_cache": config.get("score_cache"),
                     "pruning_ratio": float(config["pruning_ratio"]),
                     "run_id": run_id,
+                    "export_note": (
+                        "unit_physical saves a state_dict because per-layer FFN "
+                        "dimensions may differ from the base HuggingFace config."
+                        if config.get("pruning_mode") == "unit_physical"
+                        else "save_pretrained-compatible export"
+                    ),
                 })
             memory_trace.record("export_pruned_model")
             result["exported_pruned_model"] = export_dir

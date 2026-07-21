@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from amcprune.evaluate import evaluate_perplexity
@@ -21,6 +22,16 @@ def _block_weight_abs_mean(block):
         total += float(values.sum().cpu().item())
         count += values.numel()
     return total / max(count, 1)
+
+
+def _flatten_hidden(hidden):
+    if hidden is None or not torch.is_tensor(hidden):
+        return None
+    if hidden.dim() == 2:
+        hidden = hidden.unsqueeze(0)
+    if hidden.dim() != 3:
+        return None
+    return hidden.detach().float().reshape(-1, hidden.shape[-1])
 
 
 @torch.no_grad()
@@ -96,6 +107,67 @@ def score_blocks_by_activation_weight(
             "activation_abs_mean": activation_abs_mean,
             "weight_abs_mean": weight_abs_mean,
             "score": score,
+        })
+    return scores
+
+
+@torch.no_grad()
+def score_blocks_by_hidden_cosine(
+    model,
+    blocks,
+    dataset,
+    device,
+    batch_size=1,
+    max_batches=8,
+):
+    sums = torch.zeros(len(blocks), dtype=torch.float64)
+    counts = torch.zeros(len(blocks), dtype=torch.float64)
+    hooks = []
+
+    def make_hook(index):
+        def hook(_, inputs, output):
+            if not inputs:
+                return
+            hidden_in = _flatten_hidden(inputs[0])
+            hidden_out = _flatten_hidden(_extract_hidden(output))
+            if hidden_in is None or hidden_out is None:
+                return
+            size = min(hidden_in.shape[0], hidden_out.shape[0])
+            if size == 0:
+                return
+            cosine = F.cosine_similarity(hidden_in[:size], hidden_out[:size], dim=-1)
+            sums[index] += cosine.mean().cpu().double()
+            counts[index] += 1
+        return hook
+
+    for index, block in enumerate(blocks):
+        hooks.append(block.register_forward_hook(make_hook(index)))
+
+    loader = DataLoader(dataset, batch_size=batch_size)
+    was_training = model.training
+    model.eval()
+    try:
+        for step, (input_ids, attention_mask) in enumerate(loader):
+            if step >= max_batches:
+                break
+            model(
+                input_ids=input_ids.to(device),
+                attention_mask=attention_mask.to(device),
+            )
+    finally:
+        for hook in hooks:
+            hook.remove()
+        model.train(was_training)
+
+    scores = []
+    for index in range(len(blocks)):
+        similarity = float((sums[index] / counts[index]).item()) if counts[index] else 0.0
+        representation_delta = 1.0 - similarity
+        scores.append({
+            "block": index,
+            "hidden_cosine_similarity": similarity,
+            "representation_delta": representation_delta,
+            "score": representation_delta,
         })
     return scores
 
