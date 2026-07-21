@@ -1,6 +1,29 @@
 import gc
+from contextlib import contextmanager
 
 import torch
+
+
+@contextmanager
+def math_sdp_for_hvp():
+    """Disable fused attention kernels while building HVP graphs."""
+    has_cuda = torch.cuda.is_available()
+    if not has_cuda:
+        yield
+        return
+
+    flash_was_enabled = torch.backends.cuda.flash_sdp_enabled()
+    mem_eff_was_enabled = torch.backends.cuda.mem_efficient_sdp_enabled()
+    math_was_enabled = torch.backends.cuda.math_sdp_enabled()
+    torch.backends.cuda.enable_flash_sdp(False)
+    torch.backends.cuda.enable_mem_efficient_sdp(False)
+    torch.backends.cuda.enable_math_sdp(True)
+    try:
+        yield
+    finally:
+        torch.backends.cuda.enable_flash_sdp(flash_was_enabled)
+        torch.backends.cuda.enable_mem_efficient_sdp(mem_eff_was_enabled)
+        torch.backends.cuda.enable_math_sdp(math_was_enabled)
 
 
 class SNOWSEngine:
@@ -15,12 +38,6 @@ class SNOWSEngine:
             return []
 
         has_cuda = torch.cuda.is_available()
-        if has_cuda:
-            flash_was_enabled = torch.backends.cuda.flash_sdp_enabled()
-            mem_eff_was_enabled = torch.backends.cuda.mem_efficient_sdp_enabled()
-            torch.backends.cuda.enable_flash_sdp(False)
-            torch.backends.cuda.enable_mem_efficient_sdp(False)
-            torch.backends.cuda.enable_math_sdp(True)
 
         final_hv_list = []
         num_params = len(target_params)
@@ -49,9 +66,6 @@ class SNOWSEngine:
                 if has_cuda and index % 5 == 0:
                     torch.cuda.empty_cache()
         finally:
-            if has_cuda:
-                torch.backends.cuda.enable_flash_sdp(flash_was_enabled)
-                torch.backends.cuda.enable_mem_efficient_sdp(mem_eff_was_enabled)
             gc.collect()
             if has_cuda:
                 torch.cuda.empty_cache()

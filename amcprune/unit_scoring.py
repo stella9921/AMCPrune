@@ -5,7 +5,7 @@ import os
 import torch
 from torch.utils.data import DataLoader
 
-from amcprune.hessian import SNOWSEngine
+from amcprune.hessian import SNOWSEngine, math_sdp_for_hvp
 
 
 def _get_module(root, path):
@@ -272,16 +272,17 @@ def _compute_hvp_by_param_id(
         for step, (input_ids, attention_mask) in enumerate(loader):
             if step >= max_batches:
                 break
-            outputs = model(
-                input_ids=input_ids.to(device),
-                attention_mask=attention_mask.to(device),
-                labels=input_ids.to(device),
-            )
-            hv_list = engine.get_k_step_hessian_selective(
-                outputs.loss,
-                target_params,
-                K_horizon=k_horizon,
-            )
+            with math_sdp_for_hvp():
+                outputs = model(
+                    input_ids=input_ids.to(device),
+                    attention_mask=attention_mask.to(device),
+                    labels=input_ids.to(device),
+                )
+                hv_list = engine.get_k_step_hessian_selective(
+                    outputs.loss,
+                    target_params,
+                    K_horizon=k_horizon,
+                )
             for param, hv in zip(target_params, hv_list):
                 hv_accumulators[id(param)] += hv.detach().float().cpu().pow(2)
             used_batches += 1
