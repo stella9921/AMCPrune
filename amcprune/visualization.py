@@ -179,15 +179,21 @@ def plot_run_artifacts(
         "Perplexity before/after pruning",
         "perplexity",
     ))
-    saved.append(_save_metric_bar(
-        os.path.join(plot_dir, f"{run_id}__preservation.png"),
-        {
-            "hidden_cos": float(preservation["hidden_cosine_similarity"]),
-            "logit_kl": float(preservation["logit_kl_divergence"]),
-        },
-        "Representation preservation",
-        "metric value",
-    ))
+    preservation_values = {}
+    for key, label in [
+        ("hidden_cosine_similarity", "hidden_cos"),
+        ("logit_kl_divergence", "logit_kl"),
+    ]:
+        value = preservation.get(key) if preservation else None
+        if value is not None:
+            preservation_values[label] = float(value)
+    if preservation_values:
+        saved.append(_save_metric_bar(
+            os.path.join(plot_dir, f"{run_id}__preservation.png"),
+            preservation_values,
+            "Representation preservation",
+            "metric value",
+        ))
 
     if memory_trace:
         saved.append(_save_line_plot(

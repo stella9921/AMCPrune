@@ -1,15 +1,42 @@
 import numpy as np
 
 
+def _safe_float(value, default=0.0):
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not np.isfinite(value):
+        return default
+    return value
+
+
 def _min_max_normalize(rows, key):
-    values = [float(row.get(key, 0.0) or 0.0) for row in rows]
-    if not values:
+    raw_values = []
+    finite_values = []
+    for row in rows:
+        try:
+            value = float(row.get(key, 0.0) or 0.0)
+        except (TypeError, ValueError):
+            value = float("nan")
+        raw_values.append(value)
+        if np.isfinite(value):
+            finite_values.append(value)
+
+    if not raw_values:
         return []
-    low = min(values)
-    high = max(values)
+    if not finite_values:
+        return [0.0 for _ in raw_values]
+    low = min(finite_values)
+    high = max(finite_values)
     if high <= low:
-        return [0.0 for _ in values]
-    return [(value - low) / (high - low) for value in values]
+        return [0.0 if np.isfinite(value) else 1.0 for value in raw_values]
+    return [
+        (value - low) / (high - low)
+        if np.isfinite(value)
+        else 1.0
+        for value in raw_values
+    ]
 
 
 def apply_outlier_aware_objective(
@@ -62,6 +89,8 @@ def lagrangian_unit_allocation(unit_scores, unit_costs, keep_budget):
     unit_costs = np.asarray(unit_costs, dtype=np.float64)
     if len(unit_scores) == 0:
         return np.array([], dtype=bool)
+    unit_scores = np.nan_to_num(unit_scores, nan=-1.0, posinf=-1.0, neginf=-1.0)
+    unit_costs = np.nan_to_num(unit_costs, nan=0.0, posinf=0.0, neginf=0.0)
     if unit_scores.max() > unit_scores.min():
         scores = (unit_scores - unit_scores.min()) / (
             unit_scores.max() - unit_scores.min() + 1e-12
@@ -126,12 +155,12 @@ def build_unit_objective_plan(
         row["objective_score"] = objective
         row["score"] = objective
 
-    total_cost = sum(float(row.get("memory_cost", 0.0) or 0.0) for row in rows)
+    total_cost = sum(_safe_float(row.get("memory_cost", 0.0)) for row in rows)
     target_pruned_cost = total_cost * float(pruning_ratio)
     keep_budget = max(total_cost - target_pruned_cost, 0.0)
     keep_mask = lagrangian_unit_allocation(
         [row["keep_score"] for row in rows],
-        [row.get("memory_cost", 0.0) or 0.0 for row in rows],
+        [_safe_float(row.get("memory_cost", 0.0)) for row in rows],
         keep_budget,
     )
     for row, keep in zip(rows, keep_mask):
@@ -142,7 +171,7 @@ def build_unit_objective_plan(
             else "kept by Lagrangian allocation"
         )
     selected = [row for row in rows if row["selected"]]
-    selected_cost = sum(float(row.get("memory_cost", 0.0) or 0.0) for row in selected)
+    selected_cost = sum(_safe_float(row.get("memory_cost", 0.0)) for row in selected)
     return {
         "objective": "lagrangian_sensitivity_outlier_memory",
         "pruning_ratio_target": float(pruning_ratio),
