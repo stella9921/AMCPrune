@@ -25,6 +25,23 @@ def _find_mlp(block):
     return None
 
 
+def _infer_attention_shape(attn):
+    num_heads = getattr(attn, "num_heads", None)
+    if not isinstance(num_heads, int):
+        num_heads = getattr(attn, "num_attention_heads", None)
+    num_key_value_heads = getattr(attn, "num_key_value_heads", None)
+    if not isinstance(num_key_value_heads, int):
+        num_key_value_heads = num_heads
+    head_dim = getattr(attn, "head_dim", None)
+    if not isinstance(head_dim, int):
+        hidden_size = getattr(attn, "hidden_size", None)
+        if isinstance(hidden_size, int) and isinstance(num_heads, int) and num_heads > 0:
+            head_dim = hidden_size // num_heads
+    if not all(isinstance(value, int) and value > 0 for value in [num_heads, num_key_value_heads, head_dim]):
+        return None
+    return num_heads, num_key_value_heads, head_dim
+
+
 def _replace_linear(layer, *, keep_rows=None, keep_cols=None):
     if layer is None:
         return None, 0
@@ -228,6 +245,111 @@ def _physical_prune_ffn_neurons(block, neuron_indices):
     return int(removed), len(prune)
 
 
+def _physical_prune_attention_heads(block, head_indices):
+    attn = _find_attention(block)
+    if attn is None or not head_indices:
+        return 0, 0, "no_attention"
+
+    shape = _infer_attention_shape(attn)
+    if shape is None:
+        return 0, 0, "unknown_attention_shape"
+    num_heads, num_key_value_heads, head_dim = shape
+
+    q_proj = _linear(attn, "q_proj")
+    k_proj = _linear(attn, "k_proj")
+    v_proj = _linear(attn, "v_proj")
+    o_proj = _linear(attn, "o_proj") or _linear(attn, "c_proj")
+    if q_proj is None or o_proj is None:
+        return 0, 0, "fused_attention_not_supported"
+
+    prune = sorted(set(int(index) for index in head_indices if 0 <= int(index) < num_heads))
+    if not prune:
+        return 0, 0, "empty_selection"
+    if len(prune) >= num_heads:
+        prune = prune[:-1]
+    keep_heads = [index for index in range(num_heads) if index not in set(prune)]
+
+    if num_key_value_heads == num_heads:
+        keep_q_dims = [dim for head in keep_heads for dim in range(head * head_dim, (head + 1) * head_dim)]
+        removed = 0
+        new_q, count = _replace_linear(q_proj, keep_rows=keep_q_dims)
+        _set_linear(attn, "q_proj", new_q)
+        removed += count
+        if k_proj is not None:
+            new_k, count = _replace_linear(k_proj, keep_rows=keep_q_dims)
+            _set_linear(attn, "k_proj", new_k)
+            removed += count
+        if v_proj is not None:
+            new_v, count = _replace_linear(v_proj, keep_rows=keep_q_dims)
+            _set_linear(attn, "v_proj", new_v)
+            removed += count
+        new_o, count = _replace_linear(o_proj, keep_cols=keep_q_dims)
+        if hasattr(attn, "o_proj"):
+            _set_linear(attn, "o_proj", new_o)
+        else:
+            _set_linear(attn, "c_proj", new_o)
+        removed += count
+        try:
+            attn.num_heads = len(keep_heads)
+            attn.num_attention_heads = len(keep_heads)
+            attn.num_key_value_heads = len(keep_heads)
+            attn.num_key_value_groups = 1
+        except Exception:
+            pass
+        return int(removed), len(prune), "physical_mha"
+
+    if num_heads % num_key_value_heads != 0:
+        return 0, 0, "gqa_non_divisible_heads"
+    group_size = num_heads // num_key_value_heads
+    prune_set = set(prune)
+    prune_groups = []
+    for group in range(num_key_value_heads):
+        group_heads = set(range(group * group_size, (group + 1) * group_size))
+        if group_heads and group_heads.issubset(prune_set):
+            prune_groups.append(group)
+    if not prune_groups or len(prune_groups) >= num_key_value_heads:
+        return 0, 0, "gqa_requires_full_kv_group_selection"
+
+    keep_groups = [group for group in range(num_key_value_heads) if group not in set(prune_groups)]
+    keep_heads = [
+        head
+        for group in keep_groups
+        for head in range(group * group_size, (group + 1) * group_size)
+    ]
+    keep_q_dims = [dim for head in keep_heads for dim in range(head * head_dim, (head + 1) * head_dim)]
+    keep_kv_dims = [dim for group in keep_groups for dim in range(group * head_dim, (group + 1) * head_dim)]
+
+    removed = 0
+    new_q, count = _replace_linear(q_proj, keep_rows=keep_q_dims)
+    _set_linear(attn, "q_proj", new_q)
+    removed += count
+    if k_proj is not None:
+        new_k, count = _replace_linear(k_proj, keep_rows=keep_kv_dims)
+        _set_linear(attn, "k_proj", new_k)
+        removed += count
+    if v_proj is not None:
+        new_v, count = _replace_linear(v_proj, keep_rows=keep_kv_dims)
+        _set_linear(attn, "v_proj", new_v)
+        removed += count
+    new_o, count = _replace_linear(o_proj, keep_cols=keep_q_dims)
+    if hasattr(attn, "o_proj"):
+        _set_linear(attn, "o_proj", new_o)
+    else:
+        _set_linear(attn, "c_proj", new_o)
+    removed += count
+
+    new_num_heads = len(keep_heads)
+    new_num_kv_heads = len(keep_groups)
+    try:
+        attn.num_heads = new_num_heads
+        attn.num_attention_heads = new_num_heads
+        attn.num_key_value_heads = new_num_kv_heads
+        attn.num_key_value_groups = new_num_heads // new_num_kv_heads
+    except Exception:
+        pass
+    return int(removed), num_heads - new_num_heads, "physical_gqa_group"
+
+
 def apply_unit_mask_pruning(blocks, unit_plan):
     selected = [row for row in unit_plan.get("units", []) if row.get("selected")]
     masked_parameters = 0
@@ -281,17 +403,32 @@ def apply_unit_physical_pruning(blocks, unit_plan):
                 physically_pruned_by_type.get("ffn_neuron", 0) + pruned_neurons
             )
 
+        attention_indices = [
+            int(row["unit_index"])
+            for row in rows
+            if row["unit_type"] == "attention_head"
+        ]
+        if attention_indices:
+            removed, pruned_heads, reason = _physical_prune_attention_heads(
+                blocks[block_index],
+                attention_indices,
+            )
+            removed_parameter_entries += removed
+            if pruned_heads:
+                physically_pruned_by_type["attention_head"] = (
+                    physically_pruned_by_type.get("attention_head", 0) + pruned_heads
+                )
+            else:
+                for index in attention_indices:
+                    masked_parameter_entries += _mask_attention_head(blocks[block_index], index)
+                masked_fallback_by_type["attention_head"] = (
+                    masked_fallback_by_type.get("attention_head", 0) + len(attention_indices)
+                )
+                masked_fallback_by_type["attention_head_reason"] = reason
+
         for row in rows:
             unit_type = row["unit_type"]
             selected_by_type[unit_type] = selected_by_type.get(unit_type, 0) + 1
-            if unit_type == "attention_head":
-                masked_parameter_entries += _mask_attention_head(
-                    blocks[block_index],
-                    int(row["unit_index"]),
-                )
-                masked_fallback_by_type[unit_type] = (
-                    masked_fallback_by_type.get(unit_type, 0) + 1
-                )
 
     return {
         "pruning_mode": "unit_physical",
@@ -301,5 +438,5 @@ def apply_unit_physical_pruning(blocks, unit_plan):
         "masked_fallback_by_type": masked_fallback_by_type,
         "removed_parameter_entries": int(removed_parameter_entries),
         "masked_parameter_entries": int(masked_parameter_entries),
-        "note": "FFN neurons are physically removed. Attention heads currently use mask fallback to avoid unsafe GQA/RoPE config changes.",
+        "note": "FFN neurons are physically removed. Attention heads are physically removed for shape-safe MHA/GQA selections; unsafe GQA partial groups use mask fallback.",
     }

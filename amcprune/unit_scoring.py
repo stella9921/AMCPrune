@@ -95,16 +95,29 @@ def _score_parameter_slice(parameter, row_slice=None, col_slice=None):
     return float(score.cpu().item()), values.numel()
 
 
+def _safe_float(value, default=0.0):
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return default
+    return value if math.isfinite(value) else default
+
+
 def _hvp_parameter_slice(hv, row_slice=None, col_slice=None):
     if hv is None:
         return 0.0, 0
-    values = hv.detach().float()
+    values = torch.nan_to_num(
+        hv.detach().float(),
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    )
     if row_slice is not None and values.dim() >= 1:
         values = values[row_slice]
     if col_slice is not None and values.dim() >= 2:
         values = values[:, col_slice]
     score = values.sum()
-    return float(score.cpu().item()), values.numel()
+    return _safe_float(score.cpu().item()), values.numel()
 
 
 def _add_linear_row_score(rows, layer, row_slice):
@@ -284,7 +297,13 @@ def _compute_hvp_by_param_id(
                     K_horizon=k_horizon,
                 )
             for param, hv in zip(target_params, hv_list):
-                hv_accumulators[id(param)] += hv.detach().float().cpu().pow(2)
+                safe_hv = torch.nan_to_num(
+                    hv.detach().float(),
+                    nan=0.0,
+                    posinf=0.0,
+                    neginf=0.0,
+                )
+                hv_accumulators[id(param)] += safe_hv.cpu().pow(2)
             used_batches += 1
             model.zero_grad(set_to_none=True)
     finally:
@@ -385,6 +404,7 @@ def score_candidate_units_by_hessian_proxy(
                         if o_proj is not None:
                             _add_linear_col_score(acc, o_proj, slice(start, end))
                     raw_score, memory_cost = acc
+                    raw_score = _safe_float(raw_score)
                     sensitivity = raw_score / max(memory_cost, 1)
                     rows.append({
                         "block": block_index,
@@ -426,6 +446,7 @@ def score_candidate_units_by_hessian_proxy(
                             if layer is not None:
                                 _add_linear_col_score(acc, layer, col_slice)
                     raw_score, memory_cost = acc
+                    raw_score = _safe_float(raw_score)
                     sensitivity = raw_score / max(memory_cost, 1)
                     rows.append({
                         "block": block_index,

@@ -149,6 +149,26 @@ def parse_args():
     return parser.parse_args()
 
 
+def _fmt_float(value, digits=6, default="NA"):
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return default
+    if value != value or value in (float("inf"), float("-inf")):
+        return default
+    return f"{value:.{digits}f}"
+
+
+def _fmt_sci(value, default="NA"):
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return default
+    if value != value or value in (float("inf"), float("-inf")):
+        return default
+    return f"{value:.6e}"
+
+
 def build_pruning_context(model, blocks, block_path, selected_blocks):
     @contextmanager
     def apply_pruning():
@@ -341,11 +361,11 @@ def print_unit_objective_plan(unit_plan, max_rows=40):
         print(
             "  * "
             f"{unit['unit_name']} type={unit['unit_type']} "
-            f"hvp={unit.get('hessian_score', 0.0):.6e} "
-            f"outlier={unit.get('outlier_risk', 0.0):.6e} "
-            f"cost={float(unit.get('memory_cost', 0.0) or 0.0):.2f} "
-            f"keep={unit.get('keep_score', 0.0):.6e} "
-            f"objective={unit.get('objective_score', 0.0):.6e}"
+            f"hvp={_fmt_sci(unit.get('hessian_score'))} "
+            f"outlier={_fmt_sci(unit.get('outlier_risk'))} "
+            f"cost={_fmt_float(unit.get('memory_cost'), digits=2)} "
+            f"keep={_fmt_sci(unit.get('keep_score'))} "
+            f"objective={_fmt_sci(unit.get('objective_score'))}"
         )
     if len(selected) > max_rows:
         print(f"  ... {len(selected) - max_rows} more selected units")
@@ -797,8 +817,8 @@ def main():
         print(f"[AMCPrune] pruned_ppl={pruned['perplexity']:.4f}")
         print(
             "[AMCPrune] preservation "
-            f"hidden_cos={preservation['hidden_cosine_similarity']:.6f} "
-            f"logit_kl={preservation['logit_kl_divergence']:.6f}"
+            f"hidden_cos={_fmt_float(preservation.get('hidden_cosine_similarity'))} "
+            f"logit_kl={_fmt_float(preservation.get('logit_kl_divergence'))}"
         )
         if export_dir:
             print(f"[AMCPrune] exported_pruned_model={export_dir}")
