@@ -44,7 +44,11 @@ from amcprune.scoring import (
     score_blocks_by_hidden_cosine,
     score_blocks_by_loss_delta,
 )
-from amcprune.unit_pruning import apply_unit_mask_pruning, apply_unit_physical_pruning
+from amcprune.unit_pruning import (
+    apply_unit_mask_pruning,
+    apply_unit_physical_pruning,
+    temporary_unit_mask_pruning,
+)
 from amcprune.unit_scoring import score_candidate_units_by_hessian_proxy, save_unit_scores_csv
 from amcprune.visualization import plot_run_artifacts
 from amcprune.units import inspect_block_units, save_unit_inventory_csv
@@ -149,6 +153,14 @@ def build_pruning_context(model, blocks, block_path, selected_blocks):
     @contextmanager
     def apply_pruning():
         with temporary_block_skip(model, blocks, block_path, selected_blocks):
+            yield
+    return apply_pruning
+
+
+def build_unit_pruning_context(blocks, unit_objective_plan):
+    @contextmanager
+    def apply_pruning():
+        with temporary_unit_mask_pruning(blocks, unit_objective_plan):
             yield
     return apply_pruning
 
@@ -556,12 +568,17 @@ def main():
                     max_batches=int(config["preservation_max_batches"]),
                 )
             else:
-                preservation = {
-                    "hidden_cosine_similarity": None,
-                    "logit_kl_divergence": None,
-                    "batches": 0,
-                    "note": "Unit-mask preservation requires a dense model copy; use pruned PPL/task metrics for this prototype.",
-                }
+                preservation = evaluate_preservation(
+                    model,
+                    dataset,
+                    device=device,
+                    apply_pruning=build_unit_pruning_context(
+                        blocks,
+                        unit_objective_plan,
+                    ),
+                    batch_size=int(config["batch_size"]),
+                    max_batches=int(config["preservation_max_batches"]),
+                )
         memory_trace.record("preservation_eval")
 
         with timing_trace.stage("dense_inference_benchmark"):

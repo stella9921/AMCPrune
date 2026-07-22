@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from contextlib import contextmanager
 
 
 def _linear(module, name):
@@ -82,6 +83,25 @@ def _zero_cols(layer, start, end):
     return layer.weight[:, start:end].numel()
 
 
+def _save_and_zero_rows(layer, start, end, backups):
+    if layer is None:
+        return
+    backups.append((layer.weight, (slice(start, end), slice(None)), layer.weight[start:end, :].detach().clone()))
+    with torch.no_grad():
+        layer.weight[start:end, :] = 0
+        if getattr(layer, "bias", None) is not None:
+            backups.append((layer.bias, (slice(start, end),), layer.bias[start:end].detach().clone()))
+            layer.bias[start:end] = 0
+
+
+def _save_and_zero_cols(layer, start, end, backups):
+    if layer is None:
+        return
+    backups.append((layer.weight, (slice(None), slice(start, end)), layer.weight[:, start:end].detach().clone()))
+    with torch.no_grad():
+        layer.weight[:, start:end] = 0
+
+
 def _mask_attention_head(block, head_index):
     attn = _find_attention(block)
     if attn is None:
@@ -115,6 +135,57 @@ def _mask_ffn_neuron(block, neuron_index):
     for name in ["down_proj", "fc2", "c_proj", "w2", "wo"]:
         count += _zero_cols(_linear(mlp, name), start, end)
     return count
+
+
+def _temporary_mask_attention_head(block, head_index, backups):
+    attn = _find_attention(block)
+    if attn is None:
+        return
+    head_dim = getattr(attn, "head_dim", None)
+    if not isinstance(head_dim, int):
+        return
+    start = int(head_index) * head_dim
+    end = start + head_dim
+    q_proj = _linear(attn, "q_proj") or _linear(attn, "c_attn")
+    k_proj = _linear(attn, "k_proj")
+    v_proj = _linear(attn, "v_proj")
+    o_proj = _linear(attn, "o_proj") or _linear(attn, "c_proj")
+    _save_and_zero_rows(q_proj, start, end, backups)
+    _save_and_zero_rows(k_proj, start, end, backups)
+    _save_and_zero_rows(v_proj, start, end, backups)
+    _save_and_zero_cols(o_proj, start, end, backups)
+
+
+def _temporary_mask_ffn_neuron(block, neuron_index, backups):
+    mlp = _find_mlp(block)
+    if mlp is None:
+        return
+    start = int(neuron_index)
+    end = start + 1
+    for name in ["gate_proj", "up_proj", "fc1", "c_fc", "w1", "wi"]:
+        _save_and_zero_rows(_linear(mlp, name), start, end, backups)
+    for name in ["down_proj", "fc2", "c_proj", "w2", "wo"]:
+        _save_and_zero_cols(_linear(mlp, name), start, end, backups)
+
+
+@contextmanager
+def temporary_unit_mask_pruning(blocks, unit_plan):
+    backups = []
+    selected = [row for row in unit_plan.get("units", []) if row.get("selected")]
+    try:
+        for row in selected:
+            block_index = int(row["block"])
+            if block_index < 0 or block_index >= len(blocks):
+                continue
+            if row["unit_type"] == "attention_head":
+                _temporary_mask_attention_head(blocks[block_index], int(row["unit_index"]), backups)
+            elif row["unit_type"] == "ffn_neuron":
+                _temporary_mask_ffn_neuron(blocks[block_index], int(row["unit_index"]), backups)
+        yield
+    finally:
+        with torch.no_grad():
+            for tensor, index, value in reversed(backups):
+                tensor[index] = value.to(device=tensor.device, dtype=tensor.dtype)
 
 
 def _physical_prune_ffn_neurons(block, neuron_indices):
