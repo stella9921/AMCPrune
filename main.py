@@ -792,6 +792,7 @@ def main():
             unit_inventory=unit_inventory,
             outlier_metrics=outlier_metrics,
             inference_metrics=result["inference"],
+            unit_objective_plan=unit_objective_plan,
         )
         result["plots"] = plot_paths
         path = save_json(output_dir, "result.json", result)

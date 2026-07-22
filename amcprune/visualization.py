@@ -74,6 +74,79 @@ def _save_metric_bar(path, metrics, title, ylabel):
 
 
 
+def _safe_float(value, default=0.0):
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return default
+    if value != value or value in (float("inf"), float("-inf")):
+        return default
+    return value
+
+
+def _save_histogram(path, series, title, xlabel):
+    plt = _try_import_matplotlib()
+    if plt is None:
+        return None
+    fig, ax = plt.subplots(figsize=(8.0, 4.8))
+    for name, values in series.items():
+        values = [value for value in values if value is not None]
+        if values:
+            ax.hist(values, bins=40, alpha=0.55, label=name)
+    ax.set_title(title)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("count")
+    ax.grid(axis="y", linestyle="--", alpha=0.35)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+    return path
+
+
+def _save_scatter(path, x_values, y_values, selected, title, xlabel, ylabel):
+    plt = _try_import_matplotlib()
+    if plt is None:
+        return None
+    fig, ax = plt.subplots(figsize=(7.2, 5.2))
+    colors = ["tab:red" if flag else "tab:blue" for flag in selected]
+    ax.scatter(x_values, y_values, c=colors, alpha=0.55, s=12)
+    ax.set_title(title)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.grid(True, linestyle="--", alpha=0.35)
+    fig.tight_layout()
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+    return path
+
+
+def _save_heatmap(path, matrix, x_labels, y_labels, title, colorbar_label):
+    plt = _try_import_matplotlib()
+    if plt is None or not matrix:
+        return None
+    import numpy as np
+
+    values = np.array(matrix, dtype=float)
+    fig_width = max(8, min(18, len(x_labels) * 0.45))
+    fig_height = max(4, min(12, len(y_labels) * 0.45))
+    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+    image = ax.imshow(values, aspect="auto", interpolation="nearest")
+    ax.set_title(title)
+    ax.set_xlabel("Attention head")
+    ax.set_ylabel("Block")
+    ax.set_xticks(range(len(x_labels)))
+    ax.set_xticklabels(x_labels, rotation=45, ha="right")
+    ax.set_yticks(range(len(y_labels)))
+    ax.set_yticklabels(y_labels)
+    cbar = fig.colorbar(image, ax=ax)
+    cbar.set_label(colorbar_label)
+    fig.tight_layout()
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+    return path
+
+
 def _save_grouped_line_plot(path, labels, series, title, ylabel, selected=None, yscale=None):
     plt = _try_import_matplotlib()
     if plt is None:
@@ -115,6 +188,7 @@ def plot_run_artifacts(
     unit_inventory=None,
     outlier_metrics=None,
     inference_metrics=None,
+    unit_objective_plan=None,
 ):
     plot_dir = _ensure_dir(os.path.join(output_dir, "plots"))
     saved = []
@@ -264,6 +338,101 @@ def plot_run_artifacts(
             "Inference peak VRAM",
             "MB",
         ))
+
+    unit_plan_rows = unit_objective_plan.get("units", []) if unit_objective_plan else []
+    if unit_plan_rows:
+        selected_rows = [row for row in unit_plan_rows if row.get("selected")]
+        kept_rows = [row for row in unit_plan_rows if not row.get("selected")]
+        saved.append(_save_histogram(
+            os.path.join(plot_dir, f"{run_id}__unit_outlier_selected_vs_kept.png"),
+            {
+                "selected": [_safe_float(row.get("outlier_risk")) for row in selected_rows],
+                "kept": [_safe_float(row.get("outlier_risk")) for row in kept_rows],
+            },
+            "Unit outlier risk: selected vs kept",
+            "outlier risk",
+        ))
+        saved.append(_save_histogram(
+            os.path.join(plot_dir, f"{run_id}__unit_sensitivity_selected_vs_kept.png"),
+            {
+                "selected": [_safe_float(row.get("sensitivity_score")) for row in selected_rows],
+                "kept": [_safe_float(row.get("sensitivity_score")) for row in kept_rows],
+            },
+            "Unit sensitivity: selected vs kept",
+            "sensitivity score",
+        ))
+        saved.append(_save_scatter(
+            os.path.join(plot_dir, f"{run_id}__unit_sensitivity_vs_outlier.png"),
+            [_safe_float(row.get("sensitivity_score")) for row in unit_plan_rows],
+            [_safe_float(row.get("outlier_risk")) for row in unit_plan_rows],
+            [bool(row.get("selected")) for row in unit_plan_rows],
+            "Unit sensitivity vs outlier risk",
+            "sensitivity score",
+            "outlier risk",
+        ))
+
+        blocks = sorted({int(row.get("block", 0)) for row in unit_plan_rows})
+        unit_types = sorted({str(row.get("unit_type")) for row in unit_plan_rows})
+        for unit_type in unit_types:
+            labels = [str(block) for block in blocks]
+            total_counts = []
+            selected_counts = []
+            mean_outliers = []
+            for block in blocks:
+                rows = [
+                    row for row in unit_plan_rows
+                    if int(row.get("block", 0)) == block and row.get("unit_type") == unit_type
+                ]
+                selected = [row for row in rows if row.get("selected")]
+                total_counts.append(float(len(rows)))
+                selected_counts.append(float(len(selected)))
+                if rows:
+                    mean_outliers.append(sum(_safe_float(row.get("outlier_risk")) for row in rows) / len(rows))
+                else:
+                    mean_outliers.append(0.0)
+            saved.append(_save_grouped_line_plot(
+                os.path.join(plot_dir, f"{run_id}__unit_{unit_type}_selection_by_block.png"),
+                labels,
+                {"total": total_counts, "selected": selected_counts},
+                f"{unit_type} selection by block",
+                "unit count",
+            ))
+            saved.append(_save_bar_plot(
+                os.path.join(plot_dir, f"{run_id}__unit_{unit_type}_mean_outlier_by_block.png"),
+                labels,
+                mean_outliers,
+                f"{unit_type} mean outlier by block",
+                "outlier risk",
+            ))
+
+        head_rows = [row for row in unit_plan_rows if row.get("unit_type") == "attention_head"]
+        if head_rows:
+            blocks = sorted({int(row.get("block", 0)) for row in head_rows})
+            heads = sorted({int(row.get("unit_index", 0)) for row in head_rows})
+            value_by_key = {
+                (int(row.get("block", 0)), int(row.get("unit_index", 0))): _safe_float(row.get("outlier_risk"))
+                for row in head_rows
+            }
+            selected_by_key = {
+                (int(row.get("block", 0)), int(row.get("unit_index", 0))): 1.0 if row.get("selected") else 0.0
+                for row in head_rows
+            }
+            saved.append(_save_heatmap(
+                os.path.join(plot_dir, f"{run_id}__attention_head_outlier_heatmap.png"),
+                [[value_by_key.get((block, head), 0.0) for head in heads] for block in blocks],
+                [str(head) for head in heads],
+                [str(block) for block in blocks],
+                "Attention head outlier risk",
+                "outlier risk",
+            ))
+            saved.append(_save_heatmap(
+                os.path.join(plot_dir, f"{run_id}__attention_head_selection_heatmap.png"),
+                [[selected_by_key.get((block, head), 0.0) for head in heads] for block in blocks],
+                [str(head) for head in heads],
+                [str(block) for block in blocks],
+                "Selected attention heads",
+                "selected",
+            ))
 
     if outlier_metrics:
         outlier_labels = [str(row["block"]) for row in outlier_metrics]
