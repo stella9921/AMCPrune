@@ -39,14 +39,21 @@ def _linear(module, name):
     return layer if weight is not None else None
 
 
-def _infer_num_heads(attn):
-    value = getattr(attn, "num_heads", None)
-    return int(value) if isinstance(value, int) else None
-
-
-def _infer_head_dim(attn):
-    value = getattr(attn, "head_dim", None)
-    return int(value) if isinstance(value, int) else None
+def _infer_attention_shape(attn):
+    num_heads = getattr(attn, "num_heads", None)
+    if not isinstance(num_heads, int):
+        num_heads = getattr(attn, "num_attention_heads", None)
+    num_key_value_heads = getattr(attn, "num_key_value_heads", None)
+    if not isinstance(num_key_value_heads, int):
+        num_key_value_heads = num_heads
+    head_dim = getattr(attn, "head_dim", None)
+    if not isinstance(head_dim, int):
+        hidden_size = getattr(attn, "hidden_size", None)
+        if isinstance(hidden_size, int) and isinstance(num_heads, int) and num_heads > 0:
+            head_dim = hidden_size // num_heads
+    if not all(isinstance(value, int) and value > 0 for value in [num_heads, num_key_value_heads, head_dim]):
+        return None
+    return num_heads, num_key_value_heads, head_dim
 
 
 def _infer_ffn_dim(mlp):
@@ -378,29 +385,33 @@ def score_candidate_units_by_hessian_proxy(
         ffn_outlier = ffn_second.get(block_index)
 
         if attn is not None:
-            num_heads = _infer_num_heads(attn)
-            head_dim = _infer_head_dim(attn)
+            attention_shape = _infer_attention_shape(attn)
             q_proj = _linear(attn, "q_proj") or _linear(attn, "c_attn")
             k_proj = _linear(attn, "k_proj")
             v_proj = _linear(attn, "v_proj")
             o_proj = _linear(attn, "o_proj") or _linear(attn, "c_proj")
-            if num_heads and head_dim:
+            if attention_shape is not None:
+                num_heads, num_key_value_heads, head_dim = attention_shape
+                group_size = max(num_heads // max(num_key_value_heads, 1), 1)
                 for head in range(num_heads):
                     start = head * head_dim
                     end = start + head_dim
+                    kv_head = min(head // group_size, num_key_value_heads - 1)
+                    kv_start = kv_head * head_dim
+                    kv_end = kv_start + head_dim
                     acc = [0.0, 0]
                     if method == "hvp":
                         _add_linear_row_hvp(acc, q_proj, hv_by_param_id, slice(start, end))
-                        _add_linear_row_hvp(acc, k_proj, hv_by_param_id, slice(start, end))
-                        _add_linear_row_hvp(acc, v_proj, hv_by_param_id, slice(start, end))
+                        _add_linear_row_hvp(acc, k_proj, hv_by_param_id, slice(kv_start, kv_end))
+                        _add_linear_row_hvp(acc, v_proj, hv_by_param_id, slice(kv_start, kv_end))
                         _add_linear_col_hvp(acc, o_proj, hv_by_param_id, slice(start, end))
                     else:
                         if q_proj is not None:
                             _add_linear_row_score(acc, q_proj, slice(start, end))
                         if k_proj is not None:
-                            _add_linear_row_score(acc, k_proj, slice(start, end))
+                            _add_linear_row_score(acc, k_proj, slice(kv_start, kv_end))
                         if v_proj is not None:
-                            _add_linear_row_score(acc, v_proj, slice(start, end))
+                            _add_linear_row_score(acc, v_proj, slice(kv_start, kv_end))
                         if o_proj is not None:
                             _add_linear_col_score(acc, o_proj, slice(start, end))
                     raw_score, memory_cost = acc
@@ -418,6 +429,10 @@ def score_candidate_units_by_hessian_proxy(
                         "sensitivity_score": sensitivity,
                         "outlier_risk": _mean_slice(block_outlier, start, end),
                         "memory_cost": memory_cost,
+                        "num_attention_heads": num_heads,
+                        "num_key_value_heads": num_key_value_heads,
+                        "kv_group_size": group_size,
+                        "kv_head_index": kv_head,
                         "score": sensitivity,
                     })
 
