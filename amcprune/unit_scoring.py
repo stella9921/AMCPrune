@@ -110,13 +110,17 @@ def _safe_float(value, default=0.0):
     return value if math.isfinite(value) else default
 
 
-def _attention_resource_cost(parameter_cost, head_dim, group_size):
+def _attention_resource_cost(parameter_cost, head_dim, group_size, batch_size, seq_len):
     parameter_cost = float(parameter_cost)
     head_dim = float(max(head_dim, 1))
     group_size = float(max(group_size, 1))
-    attention_compute_cost = parameter_cost
-    activation_cost = head_dim
-    kv_cache_cost = (2.0 * head_dim) / group_size
+    batch_size = float(max(batch_size, 1))
+    seq_len = float(max(seq_len, 1))
+    linear_flops = batch_size * seq_len * parameter_cost
+    attention_flops = batch_size * 2.0 * (seq_len ** 2) * head_dim
+    attention_compute_cost = linear_flops + attention_flops
+    activation_cost = batch_size * seq_len * head_dim
+    kv_cache_cost = batch_size * seq_len * (2.0 * head_dim / group_size)
     resource_cost = (
         parameter_cost
         + attention_compute_cost
@@ -125,26 +129,32 @@ def _attention_resource_cost(parameter_cost, head_dim, group_size):
     )
     return {
         "parameter_cost": parameter_cost,
+        "linear_flops": linear_flops,
+        "attention_flops": attention_flops,
         "attention_compute_cost": attention_compute_cost,
         "activation_cost": activation_cost,
         "kv_cache_cost": kv_cache_cost,
         "resource_cost": resource_cost,
-        "resource_cost_type": "attention_head_qkvo_kvcache_compute",
+        "resource_cost_type": "attention_head_parameter_flops_activation_kvcache",
     }
 
 
-def _ffn_resource_cost(parameter_cost):
+def _ffn_resource_cost(parameter_cost, batch_size, seq_len):
     parameter_cost = float(parameter_cost)
-    mlp_compute_cost = parameter_cost
-    activation_cost = 1.0
+    batch_size = float(max(batch_size, 1))
+    seq_len = float(max(seq_len, 1))
+    mlp_compute_cost = batch_size * seq_len * parameter_cost
+    activation_cost = batch_size * seq_len
     resource_cost = parameter_cost + mlp_compute_cost + activation_cost
     return {
         "parameter_cost": parameter_cost,
+        "linear_flops": mlp_compute_cost,
+        "attention_flops": 0.0,
         "mlp_compute_cost": mlp_compute_cost,
         "activation_cost": activation_cost,
         "kv_cache_cost": 0.0,
         "resource_cost": resource_cost,
-        "resource_cost_type": "ffn_neuron_parameter_activation_compute",
+        "resource_cost_type": "ffn_neuron_parameter_flops_activation",
     }
 
 
@@ -372,6 +382,7 @@ def score_candidate_units_by_hessian_proxy(
     max_batches,
     method="hessian_proxy",
     k_horizon=1,
+    seq_len=None,
 ):
     """Score selected-block heads and FFN neurons with HVP or a proxy.
 
@@ -379,6 +390,7 @@ def score_candidate_units_by_hessian_proxy(
     path is kept as a faster fallback for smoke tests.
     """
     selected = set(selected_blocks)
+    resource_seq_len = int(seq_len or 1)
     block_second, ffn_second = _collect_unit_outliers(
         model, blocks, selected_blocks, dataset, device, batch_size, max_batches
     )
@@ -459,6 +471,8 @@ def score_candidate_units_by_hessian_proxy(
                         parameter_cost=parameter_cost,
                         head_dim=head_dim,
                         group_size=group_size,
+                        batch_size=batch_size,
+                        seq_len=resource_seq_len,
                     )
                     rows.append({
                         "block": block_index,
@@ -507,7 +521,11 @@ def score_candidate_units_by_hessian_proxy(
                     raw_score, parameter_cost = acc
                     raw_score = _safe_float(raw_score)
                     sensitivity = raw_score / max(parameter_cost, 1)
-                    cost_terms = _ffn_resource_cost(parameter_cost)
+                    cost_terms = _ffn_resource_cost(
+                        parameter_cost=parameter_cost,
+                        batch_size=batch_size,
+                        seq_len=resource_seq_len,
+                    )
                     rows.append({
                         "block": block_index,
                         "block_name": block_name,

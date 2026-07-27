@@ -375,6 +375,8 @@ def print_unit_objective_plan(unit_plan, max_rows=40):
             f"outlier={_fmt_sci(unit.get('outlier_risk'))} "
             f"resource_cost={_fmt_float(unit.get('resource_cost_effective', unit.get('memory_cost')), digits=2)} "
             f"param_cost={_fmt_float(unit.get('parameter_cost'), digits=2)} "
+            f"flops={_fmt_float(unit.get('linear_flops', 0.0) + unit.get('attention_flops', 0.0), digits=2)} "
+            f"kv={_fmt_float(unit.get('kv_cache_cost'), digits=2)} "
             f"cost_type={unit.get('resource_cost_type', 'parameter_proxy')} "
             f"keep={_fmt_sci(unit.get('keep_score'))} "
             f"objective={_fmt_sci(unit.get('objective_score'))}"
@@ -553,6 +555,7 @@ def main():
                     max_batches=int(config["unit_score_max_batches"]),
                     method=unit_score_method,
                     k_horizon=int(config["unit_hvp_k_horizon"]),
+                    seq_len=int(config["seq_len"]),
                 )
             memory_trace.record(f"unit_scoring_{unit_score_method}")
             unit_objective_plan = build_unit_objective_plan(
