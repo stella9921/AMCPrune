@@ -39,8 +39,8 @@ class MemoryTrace:
     def __init__(self):
         self.rows = []
 
-    def record(self, stage):
-        if torch.cuda.is_available():
+    def record(self, stage, synchronize=False):
+        if synchronize and torch.cuda.is_available():
             torch.cuda.synchronize()
         row = {"stage": stage, **cuda_memory_mb()}
         self.rows.append(row)
