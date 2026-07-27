@@ -124,7 +124,7 @@ def parse_args():
     parser.add_argument(
         "--pruning-mode",
         dest="pruning_mode",
-        choices=["block", "unit_mask", "unit_physical"],
+        choices=["block", "unit_mask", "unit_physical", "depth_width_physical"],
         default=None,
     )
     parser.add_argument("--unit-score", dest="unit_score", choices=["none", "hessian_proxy", "hvp"], default=None)
@@ -182,6 +182,15 @@ def build_unit_pruning_context(blocks, unit_objective_plan):
     def apply_pruning():
         with temporary_unit_mask_pruning(blocks, unit_objective_plan):
             yield
+    return apply_pruning
+
+
+def build_depth_width_pruning_context(model, blocks, block_path, depth_blocks, unit_objective_plan):
+    @contextmanager
+    def apply_pruning():
+        with temporary_unit_mask_pruning(blocks, unit_objective_plan):
+            with temporary_block_skip(model, blocks, block_path, depth_blocks):
+                yield
     return apply_pruning
 
 
@@ -509,9 +518,23 @@ def main():
             print(f"[Scores] saved importance scores: {importance_scores_path}")
         save_json_file(os.path.join(output_dir, "pruning_plan.json"), pruning_plan)
         save_pruning_plan_units_csv(os.path.join(output_dir, "pruning_plan_units.csv"), pruning_plan)
+        depth_pruned_blocks = []
+        width_candidate_blocks = selected_blocks
+        if config.get("pruning_mode") == "depth_width_physical":
+            depth_pruned_blocks = list(selected_blocks)
+            depth_pruned_set = set(depth_pruned_blocks)
+            width_candidate_blocks = [
+                index for index in range(len(blocks)) if index not in depth_pruned_set
+            ]
+            print(
+                "[Depth-Width] "
+                f"depth_pruned_blocks={depth_pruned_blocks} "
+                f"width_candidate_blocks={width_candidate_blocks}"
+            )
+
         unit_score_rows = []
         unit_objective_plan = None
-        if config.get("unit_score") in {"hessian_proxy", "hvp"} or config.get("pruning_mode") in {"unit_mask", "unit_physical"}:
+        if config.get("unit_score") in {"hessian_proxy", "hvp"} or config.get("pruning_mode") in {"unit_mask", "unit_physical", "depth_width_physical"}:
             unit_score_method = config.get("unit_score")
             if unit_score_method == "none":
                 unit_score_method = "hvp"
@@ -520,7 +543,7 @@ def main():
                     model=model,
                     blocks=blocks,
                     block_path=block_path,
-                    selected_blocks=selected_blocks,
+                    selected_blocks=width_candidate_blocks,
                     dataset=dataset,
                     device=device,
                     batch_size=int(config["batch_size"]),
@@ -554,7 +577,7 @@ def main():
             )
             print(f"[Unit Objective] decision log saved: {decision_log_path}")
             print_unit_objective_plan(unit_objective_plan)
-        unit_inventory = inspect_block_units(blocks, block_path, selected_blocks)
+        unit_inventory = inspect_block_units(blocks, block_path, width_candidate_blocks)
         save_json_file(os.path.join(output_dir, "unit_inventory.json"), unit_inventory)
         save_unit_inventory_csv(os.path.join(output_dir, "unit_inventory.csv"), unit_inventory)
         print(f"[Unit Inventory] saved {len(unit_inventory)} block unit records")
@@ -587,6 +610,21 @@ def main():
                     batch_size=int(config["batch_size"]),
                     max_batches=int(config["preservation_max_batches"]),
                 )
+            elif config.get("pruning_mode") == "depth_width_physical":
+                preservation = evaluate_preservation(
+                    model,
+                    dataset,
+                    device=device,
+                    apply_pruning=build_depth_width_pruning_context(
+                        model,
+                        blocks,
+                        block_path,
+                        depth_pruned_blocks,
+                        unit_objective_plan,
+                    ),
+                    batch_size=int(config["batch_size"]),
+                    max_batches=int(config["preservation_max_batches"]),
+                )
             else:
                 preservation = evaluate_preservation(
                     model,
@@ -612,26 +650,44 @@ def main():
         memory_trace.record("dense_inference_benchmark")
 
         with timing_trace.stage("physical_pruning"):
-            if config.get("pruning_mode") in {"unit_mask", "unit_physical"}:
+            if config.get("pruning_mode") in {"unit_mask", "unit_physical", "depth_width_physical"}:
                 if not unit_objective_plan:
                     raise ValueError("unit_mask pruning requires unit_objective_plan.")
-                if config.get("pruning_mode") == "unit_physical":
+                if config.get("pruning_mode") in {"unit_physical", "depth_width_physical"}:
                     physical_pruning = apply_unit_physical_pruning(blocks, unit_objective_plan)
                 else:
                     physical_pruning = apply_unit_mask_pruning(blocks, unit_objective_plan)
-                physical_pruning.update({
-                    "block_path": block_path,
-                    "original_num_blocks": len(blocks),
-                    "pruned_num_blocks": 0,
-                    "remaining_num_blocks": len(blocks),
-                    "removed_original_indices": [],
-                    "kept_original_indices": list(range(len(blocks))),
-                    "planned_memory_cost": sum(
-                        float(unit.get("memory_cost", 0.0) or 0.0)
-                        for unit in unit_objective_plan["units"]
-                        if unit.get("selected")
-                    ),
-                })
+                if config.get("pruning_mode") == "depth_width_physical":
+                    depth_pruning = remove_transformer_blocks(
+                        model,
+                        block_path,
+                        depth_pruned_blocks,
+                    )
+                    physical_pruning.update({
+                        "pruning_mode": "depth_width_physical",
+                        "depth_pruning": depth_pruning,
+                        "block_path": block_path,
+                        "original_num_blocks": depth_pruning["original_num_blocks"],
+                        "pruned_num_blocks": depth_pruning["pruned_num_blocks"],
+                        "remaining_num_blocks": depth_pruning["remaining_num_blocks"],
+                        "removed_original_indices": depth_pruning["removed_original_indices"],
+                        "kept_original_indices": depth_pruning["kept_original_indices"],
+                        "width_candidate_original_indices": width_candidate_blocks,
+                    })
+                else:
+                    physical_pruning.update({
+                        "block_path": block_path,
+                        "original_num_blocks": len(blocks),
+                        "pruned_num_blocks": 0,
+                        "remaining_num_blocks": len(blocks),
+                        "removed_original_indices": [],
+                        "kept_original_indices": list(range(len(blocks))),
+                    })
+                physical_pruning["planned_memory_cost"] = sum(
+                    float(unit.get("memory_cost", 0.0) or 0.0)
+                    for unit in unit_objective_plan["units"]
+                    if unit.get("selected")
+                )
             else:
                 physical_pruning = remove_transformer_blocks(
                     model,
@@ -705,6 +761,8 @@ def main():
             "block_scores": score_rows,
             "pruning_plan": pruning_plan,
             "selected_blocks": selected_blocks,
+            "depth_pruned_blocks": depth_pruned_blocks,
+            "width_candidate_blocks": width_candidate_blocks,
             "unit_inventory": unit_inventory,
             "unit_scores": unit_score_rows,
             "unit_objective_plan": unit_objective_plan,
@@ -740,7 +798,7 @@ def main():
             with timing_trace.stage("export_pruned_model"):
                 export_dir = os.path.join(output_dir, "pruned_model")
                 os.makedirs(export_dir, exist_ok=True)
-                if config.get("pruning_mode") == "unit_physical":
+                if config.get("pruning_mode") in {"unit_physical", "depth_width_physical"}:
                     import torch
                     torch.save(
                         model.state_dict(),
@@ -755,6 +813,8 @@ def main():
                     "pruning_mode": config.get("pruning_mode"),
                     "block_path": block_path,
                     "selected_blocks": selected_blocks,
+                    "depth_pruned_blocks": depth_pruned_blocks,
+                    "width_candidate_blocks": width_candidate_blocks,
                     "unit_score": config.get("unit_score"),
                     "unit_objective_plan": unit_objective_plan,
                     "physical_pruning": physical_pruning,
@@ -769,7 +829,7 @@ def main():
                     "export_note": (
                         "unit_physical saves a state_dict because per-layer FFN "
                         "dimensions may differ from the base HuggingFace config."
-                        if config.get("pruning_mode") == "unit_physical"
+                        if config.get("pruning_mode") in {"unit_physical", "depth_width_physical"}
                         else "save_pretrained-compatible export"
                     ),
                 })

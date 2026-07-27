@@ -10,6 +10,7 @@ if ROOT_DIR not in sys.path:
 import torch
 
 from amcprune.models import get_transformer_blocks, load_causal_lm
+from amcprune.pruning import remove_transformer_blocks
 from amcprune.unit_pruning import apply_unit_physical_pruning
 
 
@@ -125,6 +126,19 @@ def load_unit_physical_model(pruned_model_dir, base_model, device, dtype):
         raise ValueError("unit_physical evaluation requires unit_objective_plan in pruning config.")
 
     physical_pruning = apply_unit_physical_pruning(blocks, unit_plan)
+    if pruning_config.get("pruning_mode") == "depth_width_physical":
+        depth_blocks = pruning_config.get("depth_pruned_blocks") or pruning_config.get("selected_blocks") or []
+        depth_pruning = remove_transformer_blocks(model, detected_block_path, depth_blocks)
+        physical_pruning.update({
+            "pruning_mode": "depth_width_physical",
+            "depth_pruning": depth_pruning,
+            "block_path": detected_block_path,
+            "original_num_blocks": depth_pruning["original_num_blocks"],
+            "pruned_num_blocks": depth_pruning["pruned_num_blocks"],
+            "remaining_num_blocks": depth_pruning["remaining_num_blocks"],
+            "removed_original_indices": depth_pruning["removed_original_indices"],
+            "kept_original_indices": depth_pruning["kept_original_indices"],
+        })
     state = torch.load(state_path, map_location=device, weights_only=False)
     missing, unexpected = model.load_state_dict(state, strict=False)
     model.eval()

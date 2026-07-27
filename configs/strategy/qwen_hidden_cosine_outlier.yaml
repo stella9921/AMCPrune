@@ -14,7 +14,7 @@ score_max_batches: 16
 selection_objective: score
 outlier_metric: outlier_ratio
 outlier_weight: 0.25
-pruning_mode: unit_physical
+pruning_mode: depth_width_physical
 unit_score: hvp
 unit_pruning_ratio: 0.1
 unit_score_max_batches: 1
