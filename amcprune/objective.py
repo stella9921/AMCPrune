@@ -137,9 +137,10 @@ def build_unit_objective_plan(
 ):
     """Select low-risk structured units with Lagrangian resource allocation."""
     rows = [dict(row) for row in unit_rows]
+    cost_key = "resource_cost" if any("resource_cost" in row for row in rows) else "memory_cost"
     sensitivity_norm = _min_max_normalize(rows, "sensitivity_score")
     outlier_norm = _min_max_normalize(rows, "outlier_risk")
-    memory_norm = _min_max_normalize(rows, "memory_cost")
+    memory_norm = _min_max_normalize(rows, cost_key)
 
     for row, s_norm, o_norm, m_norm in zip(rows, sensitivity_norm, outlier_norm, memory_norm):
         prune_risk = s_norm + float(outlier_weight) * o_norm
@@ -147,7 +148,10 @@ def build_unit_objective_plan(
         objective = prune_risk - float(memory_weight) * m_norm
         row["sensitivity_score_normalized"] = s_norm
         row["outlier_risk_normalized"] = o_norm
+        row["cost_key"] = cost_key
+        row["resource_cost_effective"] = _safe_float(row.get(cost_key, 0.0))
         row["memory_cost_normalized"] = m_norm
+        row["resource_cost_normalized"] = m_norm
         row["outlier_weight"] = float(outlier_weight)
         row["memory_weight"] = float(memory_weight)
         row["prune_risk_score"] = prune_risk
@@ -155,12 +159,12 @@ def build_unit_objective_plan(
         row["objective_score"] = objective
         row["score"] = objective
 
-    total_cost = sum(_safe_float(row.get("memory_cost", 0.0)) for row in rows)
+    total_cost = sum(_safe_float(row.get(cost_key, 0.0)) for row in rows)
     target_pruned_cost = total_cost * float(pruning_ratio)
     keep_budget = max(total_cost - target_pruned_cost, 0.0)
     keep_mask = lagrangian_unit_allocation(
         [row["keep_score"] for row in rows],
-        [_safe_float(row.get("memory_cost", 0.0)) for row in rows],
+        [_safe_float(row.get(cost_key, 0.0)) for row in rows],
         keep_budget,
     )
     for row, keep in zip(rows, keep_mask):
@@ -171,9 +175,10 @@ def build_unit_objective_plan(
             else "kept by Lagrangian allocation"
         )
     selected = [row for row in rows if row["selected"]]
-    selected_cost = sum(_safe_float(row.get("memory_cost", 0.0)) for row in selected)
+    selected_cost = sum(_safe_float(row.get(cost_key, 0.0)) for row in selected)
     return {
-        "objective": "lagrangian_sensitivity_outlier_memory",
+        "objective": "lagrangian_sensitivity_outlier_type_resource",
+        "cost_key": cost_key,
         "pruning_ratio_target": float(pruning_ratio),
         "total_units": len(rows),
         "selected_units": len(selected),

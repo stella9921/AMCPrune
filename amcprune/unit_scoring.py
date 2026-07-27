@@ -110,6 +110,44 @@ def _safe_float(value, default=0.0):
     return value if math.isfinite(value) else default
 
 
+def _attention_resource_cost(parameter_cost, head_dim, group_size):
+    parameter_cost = float(parameter_cost)
+    head_dim = float(max(head_dim, 1))
+    group_size = float(max(group_size, 1))
+    attention_compute_cost = parameter_cost
+    activation_cost = head_dim
+    kv_cache_cost = (2.0 * head_dim) / group_size
+    resource_cost = (
+        parameter_cost
+        + attention_compute_cost
+        + activation_cost
+        + kv_cache_cost
+    )
+    return {
+        "parameter_cost": parameter_cost,
+        "attention_compute_cost": attention_compute_cost,
+        "activation_cost": activation_cost,
+        "kv_cache_cost": kv_cache_cost,
+        "resource_cost": resource_cost,
+        "resource_cost_type": "attention_head_qkvo_kvcache_compute",
+    }
+
+
+def _ffn_resource_cost(parameter_cost):
+    parameter_cost = float(parameter_cost)
+    mlp_compute_cost = parameter_cost
+    activation_cost = 1.0
+    resource_cost = parameter_cost + mlp_compute_cost + activation_cost
+    return {
+        "parameter_cost": parameter_cost,
+        "mlp_compute_cost": mlp_compute_cost,
+        "activation_cost": activation_cost,
+        "kv_cache_cost": 0.0,
+        "resource_cost": resource_cost,
+        "resource_cost_type": "ffn_neuron_parameter_activation_compute",
+    }
+
+
 def _hvp_parameter_slice(hv, row_slice=None, col_slice=None):
     if hv is None:
         return 0.0, 0
@@ -414,9 +452,14 @@ def score_candidate_units_by_hessian_proxy(
                             _add_linear_row_score(acc, v_proj, slice(kv_start, kv_end))
                         if o_proj is not None:
                             _add_linear_col_score(acc, o_proj, slice(start, end))
-                    raw_score, memory_cost = acc
+                    raw_score, parameter_cost = acc
                     raw_score = _safe_float(raw_score)
-                    sensitivity = raw_score / max(memory_cost, 1)
+                    sensitivity = raw_score / max(parameter_cost, 1)
+                    cost_terms = _attention_resource_cost(
+                        parameter_cost=parameter_cost,
+                        head_dim=head_dim,
+                        group_size=group_size,
+                    )
                     rows.append({
                         "block": block_index,
                         "block_name": block_name,
@@ -428,7 +471,8 @@ def score_candidate_units_by_hessian_proxy(
                         "unit_score_method": method,
                         "sensitivity_score": sensitivity,
                         "outlier_risk": _mean_slice(block_outlier, start, end),
-                        "memory_cost": memory_cost,
+                        "memory_cost": cost_terms["resource_cost"],
+                        **cost_terms,
                         "num_attention_heads": num_heads,
                         "num_key_value_heads": num_key_value_heads,
                         "kv_group_size": group_size,
@@ -460,9 +504,10 @@ def score_candidate_units_by_hessian_proxy(
                         for layer in [down_proj, fc2]:
                             if layer is not None:
                                 _add_linear_col_score(acc, layer, col_slice)
-                    raw_score, memory_cost = acc
+                    raw_score, parameter_cost = acc
                     raw_score = _safe_float(raw_score)
-                    sensitivity = raw_score / max(memory_cost, 1)
+                    sensitivity = raw_score / max(parameter_cost, 1)
+                    cost_terms = _ffn_resource_cost(parameter_cost)
                     rows.append({
                         "block": block_index,
                         "block_name": block_name,
@@ -474,7 +519,8 @@ def score_candidate_units_by_hessian_proxy(
                         "unit_score_method": method,
                         "sensitivity_score": sensitivity,
                         "outlier_risk": _mean_slice(ffn_outlier, neuron, neuron + 1),
-                        "memory_cost": memory_cost,
+                        "memory_cost": cost_terms["resource_cost"],
+                        **cost_terms,
                         "score": sensitivity,
                     })
 

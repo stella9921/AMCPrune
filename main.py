@@ -356,6 +356,7 @@ def print_unit_objective_plan(unit_plan, max_rows=40):
     print(
         "[Unit Objective] "
         f"objective={unit_plan['objective']} "
+        f"cost_key={unit_plan.get('cost_key', 'memory_cost')} "
         f"selected={unit_plan['selected_units']}/{unit_plan['total_units']} "
         f"unit_ratio={unit_plan['actual_unit_pruning_ratio']:.4f} "
         f"memory_ratio={unit_plan['actual_memory_pruning_ratio']:.4f}"
@@ -372,7 +373,9 @@ def print_unit_objective_plan(unit_plan, max_rows=40):
             f"{unit['unit_name']} type={unit['unit_type']} "
             f"hvp={_fmt_sci(unit.get('hessian_score'))} "
             f"outlier={_fmt_sci(unit.get('outlier_risk'))} "
-            f"cost={_fmt_float(unit.get('memory_cost'), digits=2)} "
+            f"resource_cost={_fmt_float(unit.get('resource_cost_effective', unit.get('memory_cost')), digits=2)} "
+            f"param_cost={_fmt_float(unit.get('parameter_cost'), digits=2)} "
+            f"cost_type={unit.get('resource_cost_type', 'parameter_proxy')} "
             f"keep={_fmt_sci(unit.get('keep_score'))} "
             f"objective={_fmt_sci(unit.get('objective_score'))}"
         )
@@ -684,7 +687,7 @@ def main():
                         "kept_original_indices": list(range(len(blocks))),
                     })
                 physical_pruning["planned_memory_cost"] = sum(
-                    float(unit.get("memory_cost", 0.0) or 0.0)
+                    float(unit.get("resource_cost_effective", unit.get("memory_cost", 0.0)) or 0.0)
                     for unit in unit_objective_plan["units"]
                     if unit.get("selected")
                 )

@@ -249,6 +249,7 @@ def save_unit_decision_log(path, unit_plan):
         stream.write(f"actual_memory_pruning_ratio={unit_plan.get('actual_memory_pruning_ratio')}\n")
         stream.write(f"selected_memory_cost={unit_plan.get('selected_memory_cost')}\n")
         stream.write(f"total_memory_cost={unit_plan.get('total_memory_cost')}\n")
+        stream.write(f"cost_key={unit_plan.get('cost_key')}\n")
         stream.write("\n[Selected Units]\n")
         for unit in selected:
             stream.write(
@@ -260,6 +261,9 @@ def save_unit_decision_log(path, unit_plan):
                 f"sensitivity={unit.get('sensitivity_score')} "
                 f"outlier={unit.get('outlier_risk')} "
                 f"memory_cost={unit.get('memory_cost')} "
+                f"resource_cost={unit.get('resource_cost_effective')} "
+                f"parameter_cost={unit.get('parameter_cost')} "
+                f"resource_cost_type={unit.get('resource_cost_type')} "
                 f"keep_score={unit.get('keep_score')} "
                 f"objective={unit.get('objective_score')} "
                 f"reason={unit.get('reason')}\n"
@@ -279,6 +283,9 @@ def save_unit_decision_log(path, unit_plan):
                 f"outlier={unit.get('outlier_risk')} "
                 f"outlier_norm={unit.get('outlier_risk_normalized')} "
                 f"memory_cost={unit.get('memory_cost')} "
+                f"resource_cost={unit.get('resource_cost_effective')} "
+                f"parameter_cost={unit.get('parameter_cost')} "
+                f"resource_cost_type={unit.get('resource_cost_type')} "
                 f"memory_norm={unit.get('memory_cost_normalized')} "
                 f"keep_score={unit.get('keep_score')} "
                 f"objective={unit.get('objective_score')}\n"
