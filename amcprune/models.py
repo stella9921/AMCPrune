@@ -36,6 +36,7 @@ def load_causal_lm(model_name, device=None, dtype="auto"):
     print("[Model Load] eval start", flush=True)
     model.eval()
     print("[Model Load] eval done", flush=True)
+    print("[Model Load] return ready", flush=True)
     return model, tokenizer, device_obj
 
 

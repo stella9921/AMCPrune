@@ -407,7 +407,9 @@ def main():
 
         with timing_trace.stage("model_load"):
             model, tokenizer, device = load_causal_lm(config["model"], dtype=config["dtype"])
+            print("[Model Load] returned to main", flush=True)
         memory_trace.record("model_loaded")
+        print("[Model Load] memory trace recorded", flush=True)
 
         with timing_trace.stage("dataset_load"):
             dataset = load_tokenized_text_dataset(

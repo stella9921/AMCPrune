@@ -136,7 +136,8 @@ class TimingTrace:
             self.rows.append(row)
             print(
                 f"[Time] stage={name} seconds={elapsed:.2f} "
-                f"elapsed={total:.2f}"
+                f"elapsed={total:.2f}",
+                flush=True,
             )
 
 
