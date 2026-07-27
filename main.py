@@ -73,6 +73,7 @@ DEFAULT_CONFIG = {
     "pruning_mode": "block",
     "unit_score": "none",
     "unit_pruning_ratio": 0.1,
+    "width_candidate_ratio": 0.25,
     "unit_score_max_batches": 4,
     "unit_hvp_k_horizon": 1,
     "memory_weight": 0.25,
@@ -129,6 +130,7 @@ def parse_args():
     )
     parser.add_argument("--unit-score", dest="unit_score", choices=["none", "hessian_proxy", "hvp"], default=None)
     parser.add_argument("--unit-pruning-ratio", dest="unit_pruning_ratio", type=float, default=None)
+    parser.add_argument("--width-candidate-ratio", dest="width_candidate_ratio", type=float, default=None)
     parser.add_argument("--unit-score-max-batches", dest="unit_score_max_batches", type=int, default=None)
     parser.add_argument("--unit-hvp-k-horizon", dest="unit_hvp_k_horizon", type=int, default=None)
     parser.add_argument("--memory-weight", dest="memory_weight", type=float, default=None)
@@ -194,6 +196,32 @@ def build_depth_width_pruning_context(model, blocks, block_path, depth_blocks, u
     return apply_pruning
 
 
+def split_depth_width_blocks(score_rows, num_blocks, depth_pruned_blocks, width_candidate_ratio):
+    """Use one block ranking for depth removal, width candidates, and protected blocks."""
+    depth_pruned_blocks = list(depth_pruned_blocks)
+    depth_pruned_set = set(depth_pruned_blocks)
+    if score_rows:
+        ranking = rank_blocks_by_scores(score_rows, descending=False)
+    else:
+        ranking = list(range(num_blocks))
+    remaining_ranked = [index for index in ranking if index not in depth_pruned_set]
+    ratio = max(float(width_candidate_ratio or 0.0), 0.0)
+    width_count = int(round(len(remaining_ranked) * ratio))
+    if ratio > 0.0 and remaining_ranked:
+        width_count = max(width_count, 1)
+    width_count = min(width_count, len(remaining_ranked))
+    width_candidate_blocks = remaining_ranked[:width_count]
+    protected_blocks = remaining_ranked[width_count:]
+    return {
+        "depth_pruned_blocks": depth_pruned_blocks,
+        "width_candidate_blocks": width_candidate_blocks,
+        "protected_blocks": protected_blocks,
+        "ranking": ranking,
+        "width_candidate_ratio": ratio,
+        "width_candidate_count": width_count,
+    }
+
+
 def print_config_summary(config):
     print(f"[Config] strategy={config['strategy']} file={config.get('config_path')}")
     print(
@@ -216,6 +244,7 @@ def print_config_summary(config):
         f"[Config] pruning_mode={config.get('pruning_mode')} "
         f"unit_score={config.get('unit_score')} "
         f"unit_pruning_ratio={config.get('unit_pruning_ratio')} "
+        f"width_candidate_ratio={config.get('width_candidate_ratio')} "
         f"unit_hvp_k_horizon={config.get('unit_hvp_k_horizon')} "
         f"memory_weight={config.get('memory_weight')}"
     )
@@ -538,18 +567,27 @@ def main():
         save_pruning_plan_units_csv(os.path.join(output_dir, "pruning_plan_units.csv"), pruning_plan)
         print("[Trace] save pruning plan done", flush=True)
         depth_pruned_blocks = []
+        protected_blocks = []
+        depth_width_split = None
         width_candidate_blocks = selected_blocks
         if config.get("pruning_mode") == "depth_width_physical":
             print("[Trace] depth-width split start", flush=True)
-            depth_pruned_blocks = list(selected_blocks)
-            depth_pruned_set = set(depth_pruned_blocks)
-            width_candidate_blocks = [
-                index for index in range(len(blocks)) if index not in depth_pruned_set
-            ]
+            depth_width_split = split_depth_width_blocks(
+                score_rows=score_rows,
+                num_blocks=len(blocks),
+                depth_pruned_blocks=selected_blocks,
+                width_candidate_ratio=config.get("width_candidate_ratio", 0.25),
+            )
+            depth_pruned_blocks = depth_width_split["depth_pruned_blocks"]
+            width_candidate_blocks = depth_width_split["width_candidate_blocks"]
+            protected_blocks = depth_width_split["protected_blocks"]
+            save_json_file(os.path.join(output_dir, "depth_width_split.json"), depth_width_split)
             print(
                 "[Depth-Width] "
                 f"depth_pruned_blocks={depth_pruned_blocks} "
-                f"width_candidate_blocks={width_candidate_blocks}"
+                f"width_candidate_blocks={width_candidate_blocks} "
+                f"protected_blocks={protected_blocks} "
+                f"width_candidate_ratio={depth_width_split['width_candidate_ratio']:.4f}"
             )
             print("[Trace] depth-width split done", flush=True)
 
@@ -786,6 +824,8 @@ def main():
             "selected_blocks": selected_blocks,
             "depth_pruned_blocks": depth_pruned_blocks,
             "width_candidate_blocks": width_candidate_blocks,
+            "protected_blocks": protected_blocks,
+            "depth_width_split": depth_width_split,
             "unit_inventory": unit_inventory,
             "unit_scores": unit_score_rows,
             "unit_objective_plan": unit_objective_plan,
@@ -838,6 +878,9 @@ def main():
                     "selected_blocks": selected_blocks,
                     "depth_pruned_blocks": depth_pruned_blocks,
                     "width_candidate_blocks": width_candidate_blocks,
+                    "protected_blocks": protected_blocks,
+                    "depth_width_split": depth_width_split,
+                    "width_candidate_ratio": float(config.get("width_candidate_ratio", 0.0)),
                     "unit_score": config.get("unit_score"),
                     "unit_objective_plan": unit_objective_plan,
                     "physical_pruning": physical_pruning,

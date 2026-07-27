@@ -445,6 +445,8 @@ def score_candidate_units_by_hessian_proxy(
     print("[Unit Scoring] build unit rows start", flush=True)
     rows = []
     for block_index in sorted(selected):
+        before_block_rows = len(rows)
+        print(f"[Unit Scoring] build rows block={block_index} start", flush=True)
         block = blocks[block_index]
         block_name = f"{block_path}.{block_index}"
         attn = _find_attention(block)
@@ -559,6 +561,12 @@ def score_candidate_units_by_hessian_proxy(
                         **cost_terms,
                         "score": sensitivity,
                     })
+
+        print(
+            f"[Unit Scoring] build rows block={block_index} "
+            f"done added={len(rows) - before_block_rows} total={len(rows)}",
+            flush=True,
+        )
 
     model.zero_grad(set_to_none=True)
     if method != "hvp":
