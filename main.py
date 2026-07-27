@@ -448,8 +448,10 @@ def main():
                 selected_blocks=selected_blocks,
             )
         memory_trace.record("outlier_metrics")
+        print("[Trace] outlier memory trace recorded", flush=True)
 
         if score_rows and config.get("selection_objective") == "outlier_aware":
+            print("[Trace] outlier-aware selection start", flush=True)
             with timing_trace.stage("outlier_aware_selection"):
                 score_rows = apply_outlier_aware_objective(
                     score_rows=score_rows,
@@ -472,11 +474,14 @@ def main():
                     f"selected_blocks={selected_blocks}"
                 )
             memory_trace.record("outlier_aware_selection")
+            print("[Trace] outlier-aware selection done", flush=True)
 
+        print("[Trace] save outlier metrics start", flush=True)
         save_json_file(os.path.join(output_dir, "outlier_metrics.json"), outlier_metrics)
         save_outlier_metrics_csv(os.path.join(output_dir, "outlier_metrics.csv"), outlier_metrics)
         print(f"[Outlier Metrics] saved {len(outlier_metrics)} block records")
 
+        print("[Trace] build pruning plan start", flush=True)
         pruning_plan = build_pruning_plan(
             model_name=config["model"],
             block_path=block_path,
@@ -487,6 +492,7 @@ def main():
             score_rows=score_rows,
             selected_blocks=selected_blocks,
         )
+        print("[Trace] build pruning plan done", flush=True)
         score_json = {
             "score": config["score"],
             "selection_objective": config.get("selection_objective"),
@@ -495,9 +501,12 @@ def main():
             "selected_blocks": selected_blocks,
             "rows": score_rows,
         }
+        print("[Trace] save block scores start", flush=True)
         save_json_file(os.path.join(output_dir, "block_scores.json"), score_json)
         save_block_scores(os.path.join(output_dir, "block_scores.csv"), score_rows, selected_blocks)
+        print("[Trace] save block scores done", flush=True)
         if score_rows:
+            print("[Trace] build importance scores start", flush=True)
             importance_scores = AMCImportanceScores.from_block_rows(
                 rows=score_rows,
                 model=config["model"],
@@ -523,11 +532,15 @@ def main():
             score_json["importance_scores_path"] = importance_scores_path
             save_json_file(os.path.join(output_dir, "block_scores.json"), score_json)
             print(f"[Scores] saved importance scores: {importance_scores_path}")
+            print("[Trace] build importance scores done", flush=True)
+        print("[Trace] save pruning plan start", flush=True)
         save_json_file(os.path.join(output_dir, "pruning_plan.json"), pruning_plan)
         save_pruning_plan_units_csv(os.path.join(output_dir, "pruning_plan_units.csv"), pruning_plan)
+        print("[Trace] save pruning plan done", flush=True)
         depth_pruned_blocks = []
         width_candidate_blocks = selected_blocks
         if config.get("pruning_mode") == "depth_width_physical":
+            print("[Trace] depth-width split start", flush=True)
             depth_pruned_blocks = list(selected_blocks)
             depth_pruned_set = set(depth_pruned_blocks)
             width_candidate_blocks = [
@@ -538,6 +551,7 @@ def main():
                 f"depth_pruned_blocks={depth_pruned_blocks} "
                 f"width_candidate_blocks={width_candidate_blocks}"
             )
+            print("[Trace] depth-width split done", flush=True)
 
         unit_score_rows = []
         unit_objective_plan = None
@@ -545,6 +559,7 @@ def main():
             unit_score_method = config.get("unit_score")
             if unit_score_method == "none":
                 unit_score_method = "hvp"
+            print("[Trace] unit scoring stage enter", flush=True)
             with timing_trace.stage(f"unit_scoring_{unit_score_method}"):
                 unit_score_rows = score_candidate_units_by_hessian_proxy(
                     model=model,

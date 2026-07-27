@@ -308,6 +308,7 @@ def _selected_target_linears(blocks, selected_blocks):
                     continue
                 seen.add(id(param))
                 layers.append((f"block{block_index}.{name}", layer))
+    print(f"[Unit Scoring] selected target linears={len(layers)}", flush=True)
     return layers
 
 
@@ -391,13 +392,22 @@ def score_candidate_units_by_hessian_proxy(
     """
     selected = set(selected_blocks)
     resource_seq_len = int(seq_len or 1)
+    print(
+        "[Unit Scoring] enter "
+        f"method={method} selected_blocks={sorted(selected)} "
+        f"batch_size={batch_size} seq_len={resource_seq_len} max_batches={max_batches}",
+        flush=True,
+    )
+    print("[Unit Scoring] collect unit outliers start", flush=True)
     block_second, ffn_second = _collect_unit_outliers(
         model, blocks, selected_blocks, dataset, device, batch_size, max_batches
     )
+    print("[Unit Scoring] collect unit outliers done", flush=True)
 
     hv_by_param_id = {}
     hvp_target_names = []
     if method == "hvp":
+        print("[Unit Scoring] HVP start", flush=True)
         hv_by_param_id, used_batches, hvp_target_names = _compute_hvp_by_param_id(
             model=model,
             blocks=blocks,
@@ -408,7 +418,13 @@ def score_candidate_units_by_hessian_proxy(
             max_batches=max_batches,
             k_horizon=k_horizon,
         )
+        print(
+            f"[Unit Scoring] HVP done batches={used_batches} "
+            f"targets={len(hvp_target_names)}",
+            flush=True,
+        )
     else:
+        print("[Unit Scoring] proxy backward start", flush=True)
         model.zero_grad(set_to_none=True)
         model_was_training = model.training
         model.eval()
@@ -424,7 +440,9 @@ def score_candidate_units_by_hessian_proxy(
             )
             (outputs.loss / float(max_batches)).backward()
             used_batches += 1
+        print(f"[Unit Scoring] proxy backward done batches={used_batches}", flush=True)
 
+    print("[Unit Scoring] build unit rows start", flush=True)
     rows = []
     for block_index in sorted(selected):
         block = blocks[block_index]
@@ -548,6 +566,7 @@ def score_candidate_units_by_hessian_proxy(
     for row in rows:
         row["score_batches"] = used_batches
         row["hvp_target_layers"] = ";".join(hvp_target_names)
+    print(f"[Unit Scoring] build unit rows done rows={len(rows)}", flush=True)
     return rows
 
 
