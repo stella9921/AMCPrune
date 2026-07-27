@@ -8,7 +8,7 @@ seq_len: 512
 batch_size: 1
 dtype: fp16
 pruning_ratio: 0.1
-score: hidden_cosine
+score: hidden_cosine_streamline
 score_cache: null
 score_max_batches: 16
 selection_objective: score

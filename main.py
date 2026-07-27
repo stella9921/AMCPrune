@@ -42,6 +42,7 @@ from amcprune.scoring import (
     score_blocks_by_activation,
     score_blocks_by_activation_weight,
     score_blocks_by_hidden_cosine,
+    score_blocks_by_hidden_cosine_streamline,
     score_blocks_by_loss_delta,
 )
 from amcprune.unit_pruning import (
@@ -108,6 +109,7 @@ def parse_args():
             "activation",
             "activation_weight",
             "hidden_cosine",
+            "hidden_cosine_streamline",
             "loss_delta",
         ],
         default=None,
@@ -301,6 +303,18 @@ def select_blocks_for_config(config, model, blocks, block_path, dataset, device)
             batch_size=int(config["batch_size"]),
             max_batches=int(config["score_max_batches"]),
         )
+    elif config["score"] == "hidden_cosine_streamline":
+        depth_count = max(1, int(round(len(blocks) * float(config["pruning_ratio"]))))
+        depth_count = min(depth_count, max(len(blocks) - 1, 1))
+        score_rows = score_blocks_by_hidden_cosine_streamline(
+            model=model,
+            blocks=blocks,
+            dataset=dataset,
+            device=device,
+            layer_intervals=depth_count + 1,
+            batch_size=int(config["batch_size"]),
+            max_batches=int(config["score_max_batches"]),
+        )
     elif config["score"] == "loss_delta":
         score_rows = score_blocks_by_loss_delta(
             model=model,
@@ -351,12 +365,14 @@ def print_score_rows(config, score_rows, selected_blocks):
                 f"loss_delta={row['loss_delta']:.6e} "
                 f"skipped_ppl={row['skipped_perplexity']:.4f}"
             )
-        elif config["score"] == "hidden_cosine":
+        elif config["score"] in {"hidden_cosine", "hidden_cosine_streamline"}:
             print(
                 f"  {marker} block={row['block']:02d} "
                 f"hidden_cos={row['hidden_cosine_similarity']:.6f} "
                 f"repr_delta={row['representation_delta']:.6e} "
-                f"score={row['score']:.6e}"
+                f"score={row['score']:.6e} "
+                f"streamline_interval={row.get('streamline_interval_start', 'NA')}"
+                f"-{row.get('streamline_interval_end', 'NA')}"
             )
         else:
             print(f"  {marker} block={row['block']:02d} score={row['score']:.6e}")
