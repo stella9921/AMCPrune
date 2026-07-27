@@ -31,15 +31,42 @@ def _infer_attention_shape(attn):
         num_heads = getattr(attn, "num_attention_heads", None)
     num_key_value_heads = getattr(attn, "num_key_value_heads", None)
     if not isinstance(num_key_value_heads, int):
+        config = getattr(attn, "config", None)
+        num_key_value_heads = getattr(config, "num_key_value_heads", None)
+    if not isinstance(num_key_value_heads, int):
         num_key_value_heads = num_heads
     head_dim = getattr(attn, "head_dim", None)
     if not isinstance(head_dim, int):
         hidden_size = getattr(attn, "hidden_size", None)
+        if not isinstance(hidden_size, int):
+            config = getattr(attn, "config", None)
+            hidden_size = getattr(config, "hidden_size", None)
         if isinstance(hidden_size, int) and isinstance(num_heads, int) and num_heads > 0:
             head_dim = hidden_size // num_heads
+    q_proj = _linear(attn, "q_proj") or _linear(attn, "c_attn")
+    k_proj = _linear(attn, "k_proj")
+    if not isinstance(num_heads, int):
+        config = getattr(attn, "config", None)
+        num_heads = getattr(config, "num_attention_heads", None)
+    if not isinstance(head_dim, int) and q_proj is not None and isinstance(num_heads, int) and num_heads > 0:
+        head_dim = int(q_proj.weight.shape[0]) // num_heads
+    if (
+        not isinstance(num_key_value_heads, int)
+        and k_proj is not None
+        and isinstance(head_dim, int)
+        and head_dim > 0
+    ):
+        num_key_value_heads = int(k_proj.weight.shape[0]) // head_dim
     if not all(isinstance(value, int) and value > 0 for value in [num_heads, num_key_value_heads, head_dim]):
         return None
     return num_heads, num_key_value_heads, head_dim
+
+
+def _row_head_indices(row):
+    values = row.get("head_indices")
+    if isinstance(values, (list, tuple)):
+        return [int(value) for value in values]
+    return [int(row["unit_index"])]
 
 
 def _replace_linear(layer, *, keep_rows=None, keep_cols=None):
@@ -123,9 +150,10 @@ def _mask_attention_head(block, head_index):
     attn = _find_attention(block)
     if attn is None:
         return 0
-    head_dim = getattr(attn, "head_dim", None)
-    if not isinstance(head_dim, int):
+    shape = _infer_attention_shape(attn)
+    if shape is None:
         return 0
+    _, _, head_dim = shape
     start = int(head_index) * head_dim
     end = start + head_dim
     count = 0
@@ -158,9 +186,10 @@ def _temporary_mask_attention_head(block, head_index, backups):
     attn = _find_attention(block)
     if attn is None:
         return
-    head_dim = getattr(attn, "head_dim", None)
-    if not isinstance(head_dim, int):
+    shape = _infer_attention_shape(attn)
+    if shape is None:
         return
+    _, _, head_dim = shape
     start = int(head_index) * head_dim
     end = start + head_dim
     q_proj = _linear(attn, "q_proj") or _linear(attn, "c_attn")
@@ -195,7 +224,8 @@ def temporary_unit_mask_pruning(blocks, unit_plan):
             if block_index < 0 or block_index >= len(blocks):
                 continue
             if row["unit_type"] == "attention_head":
-                _temporary_mask_attention_head(blocks[block_index], int(row["unit_index"]), backups)
+                for head_index in _row_head_indices(row):
+                    _temporary_mask_attention_head(blocks[block_index], head_index, backups)
             elif row["unit_type"] == "ffn_neuron":
                 _temporary_mask_ffn_neuron(blocks[block_index], int(row["unit_index"]), backups)
         yield
@@ -361,7 +391,8 @@ def apply_unit_mask_pruning(blocks, unit_plan):
         if block_index < 0 or block_index >= len(blocks):
             continue
         if unit_type == "attention_head":
-            masked_parameters += _mask_attention_head(blocks[block_index], unit_index)
+            for head_index in _row_head_indices(row):
+                masked_parameters += _mask_attention_head(blocks[block_index], head_index)
         elif unit_type == "ffn_neuron":
             masked_parameters += _mask_ffn_neuron(blocks[block_index], unit_index)
         selected_by_type[unit_type] = selected_by_type.get(unit_type, 0) + 1
@@ -404,9 +435,10 @@ def apply_unit_physical_pruning(blocks, unit_plan):
             )
 
         attention_indices = [
-            int(row["unit_index"])
+            head_index
             for row in rows
             if row["unit_type"] == "attention_head"
+            for head_index in _row_head_indices(row)
         ]
         if attention_indices:
             removed, pruned_heads, reason = _physical_prune_attention_heads(

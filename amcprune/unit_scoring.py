@@ -45,12 +45,32 @@ def _infer_attention_shape(attn):
         num_heads = getattr(attn, "num_attention_heads", None)
     num_key_value_heads = getattr(attn, "num_key_value_heads", None)
     if not isinstance(num_key_value_heads, int):
+        config = getattr(attn, "config", None)
+        num_key_value_heads = getattr(config, "num_key_value_heads", None)
+    if not isinstance(num_key_value_heads, int):
         num_key_value_heads = num_heads
     head_dim = getattr(attn, "head_dim", None)
     if not isinstance(head_dim, int):
         hidden_size = getattr(attn, "hidden_size", None)
+        if not isinstance(hidden_size, int):
+            config = getattr(attn, "config", None)
+            hidden_size = getattr(config, "hidden_size", None)
         if isinstance(hidden_size, int) and isinstance(num_heads, int) and num_heads > 0:
             head_dim = hidden_size // num_heads
+    q_proj = _linear(attn, "q_proj") or _linear(attn, "c_attn")
+    k_proj = _linear(attn, "k_proj")
+    if not isinstance(num_heads, int):
+        config = getattr(attn, "config", None)
+        num_heads = getattr(config, "num_attention_heads", None)
+    if not isinstance(head_dim, int) and q_proj is not None and isinstance(num_heads, int) and num_heads > 0:
+        head_dim = int(q_proj.weight.shape[0]) // num_heads
+    if (
+        not isinstance(num_key_value_heads, int)
+        and k_proj is not None
+        and isinstance(head_dim, int)
+        and head_dim > 0
+    ):
+        num_key_value_heads = int(k_proj.weight.shape[0]) // head_dim
     if not all(isinstance(value, int) and value > 0 for value in [num_heads, num_key_value_heads, head_dim]):
         return None
     return num_heads, num_key_value_heads, head_dim
@@ -463,33 +483,36 @@ def score_candidate_units_by_hessian_proxy(
             if attention_shape is not None:
                 num_heads, num_key_value_heads, head_dim = attention_shape
                 group_size = max(num_heads // max(num_key_value_heads, 1), 1)
-                for head in range(num_heads):
-                    start = head * head_dim
-                    end = start + head_dim
-                    kv_head = min(head // group_size, num_key_value_heads - 1)
+                for group in range(num_key_value_heads):
+                    head_indices = list(range(group * group_size, min((group + 1) * group_size, num_heads)))
+                    if not head_indices:
+                        continue
+                    query_start = head_indices[0] * head_dim
+                    query_end = (head_indices[-1] + 1) * head_dim
+                    kv_head = min(group, num_key_value_heads - 1)
                     kv_start = kv_head * head_dim
                     kv_end = kv_start + head_dim
                     acc = [0.0, 0]
                     if method == "hvp":
-                        _add_linear_row_hvp(acc, q_proj, hv_by_param_id, slice(start, end))
+                        _add_linear_row_hvp(acc, q_proj, hv_by_param_id, slice(query_start, query_end))
                         _add_linear_row_hvp(acc, k_proj, hv_by_param_id, slice(kv_start, kv_end))
                         _add_linear_row_hvp(acc, v_proj, hv_by_param_id, slice(kv_start, kv_end))
-                        _add_linear_col_hvp(acc, o_proj, hv_by_param_id, slice(start, end))
+                        _add_linear_col_hvp(acc, o_proj, hv_by_param_id, slice(query_start, query_end))
                     else:
                         if q_proj is not None:
-                            _add_linear_row_score(acc, q_proj, slice(start, end))
+                            _add_linear_row_score(acc, q_proj, slice(query_start, query_end))
                         if k_proj is not None:
                             _add_linear_row_score(acc, k_proj, slice(kv_start, kv_end))
                         if v_proj is not None:
                             _add_linear_row_score(acc, v_proj, slice(kv_start, kv_end))
                         if o_proj is not None:
-                            _add_linear_col_score(acc, o_proj, slice(start, end))
+                            _add_linear_col_score(acc, o_proj, slice(query_start, query_end))
                     raw_score, parameter_cost = acc
                     raw_score = _safe_float(raw_score)
                     sensitivity = raw_score / max(parameter_cost, 1)
                     cost_terms = _attention_resource_cost(
                         parameter_cost=parameter_cost,
-                        head_dim=head_dim,
+                        head_dim=head_dim * len(head_indices),
                         group_size=group_size,
                         batch_size=batch_size,
                         seq_len=resource_seq_len,
@@ -498,13 +521,16 @@ def score_candidate_units_by_hessian_proxy(
                         "block": block_index,
                         "block_name": block_name,
                         "unit_type": "attention_head",
-                        "unit_index": head,
-                        "unit_name": f"{block_name}.attention_head.{head}",
+                        "unit_index": head_indices[0],
+                        "unit_name": f"{block_name}.attention_head_group.{group}",
+                        "head_indices": head_indices,
+                        "head_group_index": group,
+                        "head_group_size": len(head_indices),
                         "hessian_score": sensitivity,
                         "hessian_proxy_score": sensitivity,
                         "unit_score_method": method,
                         "sensitivity_score": sensitivity,
-                        "outlier_risk": _mean_slice(block_outlier, start, end),
+                        "outlier_risk": _mean_slice(block_outlier, query_start, query_end),
                         "memory_cost": cost_terms["resource_cost"],
                         **cost_terms,
                         "num_attention_heads": num_heads,
