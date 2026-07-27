@@ -23,8 +23,6 @@ def load_causal_lm(model_name, device=None, dtype="auto"):
         "torch_dtype": torch_dtype,
         "low_cpu_mem_usage": True,
     }
-    if device_obj.type == "cuda":
-        load_kwargs["device_map"] = {"": str(device_obj)}
 
     print(
         f"[Model Load] weights start: dtype={dtype} device={device_obj}",
@@ -32,11 +30,12 @@ def load_causal_lm(model_name, device=None, dtype="auto"):
     )
     model = AutoModelForCausalLM.from_pretrained(model_name, **load_kwargs)
     print("[Model Load] weights done", flush=True)
-    if device_obj.type != "cuda":
-        print(f"[Model Load] moving model to {device_obj}", flush=True)
-        model.to(device_obj)
-        print("[Model Load] move done", flush=True)
+    print(f"[Model Load] move start: {device_obj}", flush=True)
+    model.to(device_obj)
+    print("[Model Load] move done", flush=True)
+    print("[Model Load] eval start", flush=True)
     model.eval()
+    print("[Model Load] eval done", flush=True)
     return model, tokenizer, device_obj
 
 
