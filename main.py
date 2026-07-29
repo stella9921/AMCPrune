@@ -75,6 +75,9 @@ DEFAULT_CONFIG = {
     "unit_score": "none",
     "unit_pruning_ratio": 0.1,
     "width_candidate_ratio": 0.25,
+    "width_candidate_count": None,
+    "post_depth_recalibration": True,
+    "exclude_depth_boundary_blocks": False,
     "unit_score_max_batches": 4,
     "unit_hvp_k_horizon": 1,
     "memory_weight": 0.25,
@@ -133,6 +136,11 @@ def parse_args():
     parser.add_argument("--unit-score", dest="unit_score", choices=["none", "hessian_proxy", "hvp"], default=None)
     parser.add_argument("--unit-pruning-ratio", dest="unit_pruning_ratio", type=float, default=None)
     parser.add_argument("--width-candidate-ratio", dest="width_candidate_ratio", type=float, default=None)
+    parser.add_argument("--width-candidate-count", dest="width_candidate_count", type=int, default=None)
+    parser.add_argument("--post-depth-recalibration", dest="post_depth_recalibration", action="store_true", default=None)
+    parser.add_argument("--no-post-depth-recalibration", dest="post_depth_recalibration", action="store_false")
+    parser.add_argument("--exclude-depth-boundary-blocks", dest="exclude_depth_boundary_blocks", action="store_true", default=None)
+    parser.add_argument("--include-depth-boundary-blocks", dest="exclude_depth_boundary_blocks", action="store_false")
     parser.add_argument("--unit-score-max-batches", dest="unit_score_max_batches", type=int, default=None)
     parser.add_argument("--unit-hvp-k-horizon", dest="unit_hvp_k_horizon", type=int, default=None)
     parser.add_argument("--memory-weight", dest="memory_weight", type=float, default=None)
@@ -224,6 +232,102 @@ def split_depth_width_blocks(score_rows, num_blocks, depth_pruned_blocks, width_
     }
 
 
+def _count_width_candidates(num_candidates, ratio=None, count=None):
+    if count is not None:
+        width_count = max(int(count), 0)
+    else:
+        ratio = max(float(ratio or 0.0), 0.0)
+        width_count = int(round(num_candidates * ratio))
+        if ratio > 0.0 and num_candidates:
+            width_count = max(width_count, 1)
+    return min(width_count, num_candidates)
+
+
+def _depth_boundary_blocks(depth_pruned_blocks, num_blocks):
+    if not depth_pruned_blocks:
+        return []
+    low = min(depth_pruned_blocks)
+    high = max(depth_pruned_blocks)
+    boundaries = []
+    if low - 1 >= 0:
+        boundaries.append(low - 1)
+    if high + 1 < num_blocks:
+        boundaries.append(high + 1)
+    return boundaries
+
+
+def split_depth_width_blocks_post_depth(
+    *,
+    model,
+    blocks,
+    block_path,
+    dataset,
+    device,
+    batch_size,
+    max_batches,
+    depth_pruned_blocks,
+    width_candidate_ratio,
+    width_candidate_count=None,
+    exclude_depth_boundary_blocks=False,
+):
+    """Re-score surviving blocks after depth pruning and pick bottom-K width candidates."""
+    depth_pruned_blocks = sorted(set(int(index) for index in depth_pruned_blocks))
+    depth_pruned_set = set(depth_pruned_blocks)
+    boundary_blocks = set(
+        _depth_boundary_blocks(depth_pruned_blocks, len(blocks))
+        if exclude_depth_boundary_blocks
+        else []
+    )
+
+    with temporary_block_skip(model, blocks, block_path, depth_pruned_blocks):
+        post_depth_rows = score_blocks_by_hidden_cosine(
+            model=model,
+            blocks=blocks,
+            dataset=dataset,
+            device=device,
+            batch_size=batch_size,
+            max_batches=max_batches,
+        )
+
+    candidate_rows = []
+    for row in post_depth_rows:
+        block_index = int(row["block"])
+        row["post_depth_recalibration"] = True
+        row["depth_pruned"] = block_index in depth_pruned_set
+        row["excluded_depth_boundary"] = block_index in boundary_blocks
+        row["width_candidate_score"] = row.get("score")
+        if block_index not in depth_pruned_set and block_index not in boundary_blocks:
+            candidate_rows.append(row)
+
+    ranking = [row["block"] for row in sorted(candidate_rows, key=lambda item: item["score"])]
+    width_count = _count_width_candidates(
+        len(ranking),
+        ratio=width_candidate_ratio,
+        count=width_candidate_count,
+    )
+    width_candidate_blocks = ranking[:width_count]
+    width_candidate_set = set(width_candidate_blocks)
+    protected_blocks = [
+        index for index in range(len(blocks))
+        if index not in depth_pruned_set and index not in width_candidate_set
+    ]
+    for row in post_depth_rows:
+        row["selected_width_candidate"] = int(row["block"]) in width_candidate_set
+
+    return {
+        "mode": "post_depth_recalibration",
+        "depth_pruned_blocks": depth_pruned_blocks,
+        "width_candidate_blocks": width_candidate_blocks,
+        "protected_blocks": protected_blocks,
+        "excluded_depth_boundary_blocks": sorted(boundary_blocks),
+        "post_depth_ranking": ranking,
+        "width_candidate_ratio": float(width_candidate_ratio or 0.0),
+        "width_candidate_count": width_count,
+        "width_candidate_count_requested": width_candidate_count,
+        "post_depth_score_rows": post_depth_rows,
+    }
+
+
 def print_config_summary(config):
     print(f"[Config] strategy={config['strategy']} file={config.get('config_path')}")
     print(
@@ -247,6 +351,9 @@ def print_config_summary(config):
         f"unit_score={config.get('unit_score')} "
         f"unit_pruning_ratio={config.get('unit_pruning_ratio')} "
         f"width_candidate_ratio={config.get('width_candidate_ratio')} "
+        f"width_candidate_count={config.get('width_candidate_count')} "
+        f"post_depth_recalibration={config.get('post_depth_recalibration')} "
+        f"exclude_depth_boundary_blocks={config.get('exclude_depth_boundary_blocks')} "
         f"unit_hvp_k_horizon={config.get('unit_hvp_k_horizon')} "
         f"memory_weight={config.get('memory_weight')}"
     )
@@ -543,6 +650,10 @@ def main():
             "selection_objective": config.get("selection_objective"),
             "outlier_metric": config.get("outlier_metric"),
             "outlier_weight": config.get("outlier_weight"),
+            "post_depth_recalibration": config.get("post_depth_recalibration"),
+            "width_candidate_ratio": config.get("width_candidate_ratio"),
+            "width_candidate_count": config.get("width_candidate_count"),
+            "exclude_depth_boundary_blocks": config.get("exclude_depth_boundary_blocks"),
             "selected_blocks": selected_blocks,
             "rows": score_rows,
         }
@@ -569,6 +680,10 @@ def main():
                     "selection_objective": config.get("selection_objective"),
                     "outlier_metric": config.get("outlier_metric"),
                     "outlier_weight": config.get("outlier_weight"),
+                    "post_depth_recalibration": config.get("post_depth_recalibration"),
+                    "width_candidate_ratio": config.get("width_candidate_ratio"),
+                    "width_candidate_count": config.get("width_candidate_count"),
+                    "exclude_depth_boundary_blocks": config.get("exclude_depth_boundary_blocks"),
                     "seed": config.get("seed"),
                 },
             )
@@ -588,23 +703,61 @@ def main():
         width_candidate_blocks = selected_blocks
         if config.get("pruning_mode") == "depth_width_physical":
             print("[Trace] depth-width split start", flush=True)
-            depth_width_split = split_depth_width_blocks(
-                score_rows=score_rows,
-                num_blocks=len(blocks),
-                depth_pruned_blocks=selected_blocks,
-                width_candidate_ratio=config.get("width_candidate_ratio", 0.25),
-            )
+            if config.get("post_depth_recalibration", True):
+                with timing_trace.stage("post_depth_recalibration"):
+                    depth_width_split = split_depth_width_blocks_post_depth(
+                        model=model,
+                        blocks=blocks,
+                        block_path=block_path,
+                        dataset=dataset,
+                        device=device,
+                        batch_size=int(config["batch_size"]),
+                        max_batches=int(config["score_max_batches"]),
+                        depth_pruned_blocks=selected_blocks,
+                        width_candidate_ratio=config.get("width_candidate_ratio", 0.25),
+                        width_candidate_count=config.get("width_candidate_count"),
+                        exclude_depth_boundary_blocks=bool(config.get("exclude_depth_boundary_blocks", False)),
+                    )
+                memory_trace.record("post_depth_recalibration")
+                post_depth_score_rows = depth_width_split.get("post_depth_score_rows", [])
+                save_json_file(
+                    os.path.join(output_dir, "post_depth_block_scores.json"),
+                    {
+                        "score": "post_depth_hidden_cosine",
+                        "depth_pruned_blocks": selected_blocks,
+                        "rows": post_depth_score_rows,
+                    },
+                )
+                save_block_scores(
+                    os.path.join(output_dir, "post_depth_block_scores.csv"),
+                    post_depth_score_rows,
+                    depth_width_split["width_candidate_blocks"],
+                )
+            else:
+                depth_width_split = split_depth_width_blocks(
+                    score_rows=score_rows,
+                    num_blocks=len(blocks),
+                    depth_pruned_blocks=selected_blocks,
+                    width_candidate_ratio=config.get("width_candidate_ratio", 0.25),
+                )
             depth_pruned_blocks = depth_width_split["depth_pruned_blocks"]
             width_candidate_blocks = depth_width_split["width_candidate_blocks"]
             protected_blocks = depth_width_split["protected_blocks"]
             save_json_file(os.path.join(output_dir, "depth_width_split.json"), depth_width_split)
             print(
                 "[Depth-Width] "
+                f"mode={depth_width_split.get('mode', 'score_ranking')} "
                 f"depth_pruned_blocks={depth_pruned_blocks} "
                 f"width_candidate_blocks={width_candidate_blocks} "
                 f"protected_blocks={protected_blocks} "
-                f"width_candidate_ratio={depth_width_split['width_candidate_ratio']:.4f}"
+                f"width_candidate_ratio={depth_width_split['width_candidate_ratio']:.4f} "
+                f"width_candidate_count={depth_width_split.get('width_candidate_count')}"
             )
+            if depth_width_split.get("excluded_depth_boundary_blocks"):
+                print(
+                    "[Depth-Width] "
+                    f"excluded_depth_boundary_blocks={depth_width_split['excluded_depth_boundary_blocks']}"
+                )
             print("[Trace] depth-width split done", flush=True)
 
         unit_score_rows = []

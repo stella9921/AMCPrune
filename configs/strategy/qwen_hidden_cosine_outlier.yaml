@@ -18,6 +18,9 @@ pruning_mode: depth_width_physical
 unit_score: hvp
 unit_pruning_ratio: 0.1
 width_candidate_ratio: 0.25
+width_candidate_count: null
+post_depth_recalibration: true
+exclude_depth_boundary_blocks: false
 unit_score_max_batches: 1
 unit_hvp_k_horizon: 1
 memory_weight: 0.25
