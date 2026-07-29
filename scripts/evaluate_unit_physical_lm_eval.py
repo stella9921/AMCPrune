@@ -9,6 +9,7 @@ if ROOT_DIR not in sys.path:
 
 import torch
 
+from amcprune.compensation import apply_boundary_affine_compensation_from_metadata
 from amcprune.models import get_transformer_blocks, load_causal_lm
 from amcprune.pruning import remove_transformer_blocks
 from amcprune.unit_pruning import apply_unit_physical_pruning
@@ -139,6 +140,14 @@ def load_unit_physical_model(pruned_model_dir, base_model, device, dtype):
             "removed_original_indices": depth_pruning["removed_original_indices"],
             "kept_original_indices": depth_pruning["kept_original_indices"],
         })
+        compensation = pruning_config.get("boundary_compensation")
+        if compensation and compensation.get("enabled"):
+            physical_pruning["boundary_compensation"] = apply_boundary_affine_compensation_from_metadata(
+                model,
+                detected_block_path,
+                depth_pruning["kept_original_indices"],
+                compensation,
+            )
     state = torch.load(state_path, map_location=device, weights_only=False)
     missing, unexpected = model.load_state_dict(state, strict=False)
     model.eval()

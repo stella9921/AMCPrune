@@ -4,6 +4,10 @@ import json
 import os
 from contextlib import contextmanager
 
+from amcprune.compensation import (
+    apply_boundary_affine_compensation,
+    estimate_boundary_affine_compensation,
+)
 from amcprune.data import load_tokenized_text_dataset
 from amcprune.evaluate import benchmark_generation, evaluate_perplexity, evaluate_preservation
 from amcprune.experiment import (
@@ -81,6 +85,9 @@ DEFAULT_CONFIG = {
     "unit_score_max_batches": 4,
     "unit_hvp_k_horizon": 1,
     "memory_weight": 0.25,
+    "boundary_compensation": False,
+    "boundary_compensation_max_batches": 8,
+    "boundary_compensation_eps": 1.0e-6,
     "preservation_max_batches": 8,
     "inference_prompt": "The future of artificial intelligence is",
     "inference_max_new_tokens": 32,
@@ -144,6 +151,10 @@ def parse_args():
     parser.add_argument("--unit-score-max-batches", dest="unit_score_max_batches", type=int, default=None)
     parser.add_argument("--unit-hvp-k-horizon", dest="unit_hvp_k_horizon", type=int, default=None)
     parser.add_argument("--memory-weight", dest="memory_weight", type=float, default=None)
+    parser.add_argument("--boundary-compensation", dest="boundary_compensation", action="store_true", default=None)
+    parser.add_argument("--no-boundary-compensation", dest="boundary_compensation", action="store_false")
+    parser.add_argument("--boundary-compensation-max-batches", dest="boundary_compensation_max_batches", type=int, default=None)
+    parser.add_argument("--boundary-compensation-eps", dest="boundary_compensation_eps", type=float, default=None)
     parser.add_argument(
         "--preservation-max-batches",
         dest="preservation_max_batches",
@@ -355,7 +366,8 @@ def print_config_summary(config):
         f"post_depth_recalibration={config.get('post_depth_recalibration')} "
         f"exclude_depth_boundary_blocks={config.get('exclude_depth_boundary_blocks')} "
         f"unit_hvp_k_horizon={config.get('unit_hvp_k_horizon')} "
-        f"memory_weight={config.get('memory_weight')}"
+        f"memory_weight={config.get('memory_weight')} "
+        f"boundary_compensation={config.get('boundary_compensation')}"
     )
 
 
@@ -813,6 +825,33 @@ def main():
         print(f"[Unit Inventory] saved {len(unit_inventory)} block unit records")
         print_pruning_plan(pruning_plan)
 
+        boundary_compensation = None
+        boundary_compensation_applied = None
+        if config.get("boundary_compensation"):
+            print("[Trace] boundary compensation estimation start", flush=True)
+            with timing_trace.stage("boundary_compensation_estimation"):
+                boundary_compensation = estimate_boundary_affine_compensation(
+                    model=model,
+                    blocks=blocks,
+                    dataset=dataset,
+                    device=device,
+                    batch_size=int(config["batch_size"]),
+                    max_batches=int(config["boundary_compensation_max_batches"]),
+                    depth_pruned_blocks=depth_pruned_blocks,
+                    eps=float(config["boundary_compensation_eps"]),
+                )
+            memory_trace.record("boundary_compensation_estimation")
+            boundary_compensation_summary = {
+                key: value
+                for key, value in boundary_compensation.items()
+                if key not in {"alpha", "beta"}
+            }
+            save_json_file(
+                os.path.join(output_dir, "boundary_compensation.json"),
+                boundary_compensation_summary,
+            )
+            print(f"[Boundary Compensation] estimated={boundary_compensation_summary}", flush=True)
+
         dense_parameter_count = model_parameter_count(model)
         dense_parameter_memory_mb = model_parameter_memory_mb(model)
 
@@ -904,6 +943,14 @@ def main():
                         "kept_original_indices": depth_pruning["kept_original_indices"],
                         "width_candidate_original_indices": width_candidate_blocks,
                     })
+                    if boundary_compensation is not None:
+                        boundary_compensation_applied = apply_boundary_affine_compensation(
+                            model=model,
+                            block_path=block_path,
+                            kept_original_indices=depth_pruning["kept_original_indices"],
+                            compensation=boundary_compensation,
+                        )
+                        physical_pruning["boundary_compensation"] = boundary_compensation_applied
                 else:
                     physical_pruning.update({
                         "block_path": block_path,
@@ -950,6 +997,8 @@ def main():
             print(f"[Pruning Result] physically_pruned_by_type={physical_pruning['physically_pruned_by_type']}")
         if physical_pruning.get("masked_fallback_by_type"):
             print(f"[Pruning Result] masked_fallback_by_type={physical_pruning['masked_fallback_by_type']}")
+        if physical_pruning.get("boundary_compensation"):
+            print(f"[Pruning Result] boundary_compensation={physical_pruning['boundary_compensation']}")
 
         with timing_trace.stage("pruned_eval"):
             pruned = evaluate_perplexity(
@@ -1000,6 +1049,7 @@ def main():
             "unit_objective_plan": unit_objective_plan,
             "outlier_metrics": outlier_metrics,
             "physical_pruning": physical_pruning,
+            "boundary_compensation": boundary_compensation_applied,
             "dense_parameter_count": dense_parameter_count,
             "pruned_parameter_count": pruned_parameter_count,
             "removed_parameter_count": dense_parameter_count - pruned_parameter_count,
@@ -1053,6 +1103,7 @@ def main():
                     "unit_score": config.get("unit_score"),
                     "unit_objective_plan": unit_objective_plan,
                     "physical_pruning": physical_pruning,
+                    "boundary_compensation": boundary_compensation_applied,
                     "remaining_num_blocks": physical_pruning["remaining_num_blocks"],
                     "selected_unit_names": [
                         unit["unit_name"] for unit in pruning_plan["units"] if unit["selected"]
