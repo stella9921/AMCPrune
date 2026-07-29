@@ -35,7 +35,6 @@ from amcprune.pruning import (
     remove_transformer_blocks,
     select_blocks,
     select_blocks_from_ranking,
-    select_non_adjacent_blocks_from_ranking,
     temporary_block_skip,
 )
 from amcprune.scoring import (
@@ -69,8 +68,6 @@ DEFAULT_CONFIG = {
     "score": "block_index",
     "score_cache": None,
     "score_max_batches": 8,
-    "depth_selection_mode": "contiguous",
-    "depth_min_gap": 1,
     "selection_objective": "score",
     "outlier_metric": "outlier_ratio",
     "outlier_weight": 0.25,
@@ -122,13 +119,6 @@ def parse_args():
     )
     parser.add_argument("--score-cache", dest="score_cache", default=None)
     parser.add_argument("--score-max-batches", dest="score_max_batches", type=int, default=None)
-    parser.add_argument(
-        "--depth-selection-mode",
-        dest="depth_selection_mode",
-        choices=["contiguous", "non_adjacent"],
-        default=None,
-    )
-    parser.add_argument("--depth-min-gap", dest="depth_min_gap", type=int, default=None)
     parser.add_argument(
         "--selection-objective",
         dest="selection_objective",
@@ -353,8 +343,6 @@ def print_config_summary(config):
         print(f"[Config] score_cache={config['score_cache']}")
     print(
         f"[Config] selection_objective={config.get('selection_objective')} "
-        f"depth_selection_mode={config.get('depth_selection_mode')} "
-        f"depth_min_gap={config.get('depth_min_gap')} "
         f"outlier_metric={config.get('outlier_metric')} "
         f"outlier_weight={config.get('outlier_weight')}"
     )
@@ -385,29 +373,14 @@ def load_score_cache(path):
     raise ValueError(f"Unsupported score cache format: {path}")
 
 
-def select_depth_blocks_from_score_rows(config, score_rows, num_blocks):
-    ranking = rank_blocks_by_scores(score_rows, descending=False)
-    mode = config.get("depth_selection_mode", "contiguous")
-    if mode == "non_adjacent":
-        return select_non_adjacent_blocks_from_ranking(
-            ranking=ranking,
-            num_blocks=num_blocks,
-            pruning_ratio=float(config["pruning_ratio"]),
-            min_gap=int(config.get("depth_min_gap", 1)),
-        )
-    if mode != "contiguous":
-        raise ValueError(f"Unsupported depth_selection_mode: {mode}")
-    return select_blocks_from_ranking(
-        ranking=ranking,
-        num_blocks=num_blocks,
-        pruning_ratio=float(config["pruning_ratio"]),
-    )
-
-
 def select_blocks_for_config(config, model, blocks, block_path, dataset, device):
     if config.get("score_cache"):
         score_rows = load_score_cache(config["score_cache"])
-        selected_blocks = select_depth_blocks_from_score_rows(config, score_rows, len(blocks))
+        selected_blocks = select_blocks_from_ranking(
+            ranking=rank_blocks_by_scores(score_rows, descending=False),
+            num_blocks=len(blocks),
+            pruning_ratio=float(config["pruning_ratio"]),
+        )
         return score_rows, selected_blocks
 
     if config["score"] == "activation":
@@ -467,7 +440,11 @@ def select_blocks_for_config(config, model, blocks, block_path, dataset, device)
         )
         return [], selected_blocks
 
-    selected_blocks = select_depth_blocks_from_score_rows(config, score_rows, len(blocks))
+    selected_blocks = select_blocks_from_ranking(
+        ranking=rank_blocks_by_scores(score_rows, descending=False),
+        num_blocks=len(blocks),
+        pruning_ratio=float(config["pruning_ratio"]),
+    )
     return score_rows, selected_blocks
 
 
@@ -634,7 +611,11 @@ def main():
                     outlier_metric=config.get("outlier_metric", "outlier_ratio"),
                     outlier_weight=float(config.get("outlier_weight", 0.25)),
                 )
-                selected_blocks = select_depth_blocks_from_score_rows(config, score_rows, len(blocks))
+                selected_blocks = select_blocks_from_ranking(
+                    ranking=rank_blocks_by_scores(score_rows, descending=False),
+                    num_blocks=len(blocks),
+                    pruning_ratio=float(config["pruning_ratio"]),
+                )
                 selected_set = set(selected_blocks)
                 for row in outlier_metrics:
                     row["selected_block"] = row["block"] in selected_set
@@ -667,8 +648,6 @@ def main():
         score_json = {
             "score": config["score"],
             "selection_objective": config.get("selection_objective"),
-            "depth_selection_mode": config.get("depth_selection_mode"),
-            "depth_min_gap": config.get("depth_min_gap"),
             "outlier_metric": config.get("outlier_metric"),
             "outlier_weight": config.get("outlier_weight"),
             "post_depth_recalibration": config.get("post_depth_recalibration"),
@@ -699,8 +678,6 @@ def main():
                     "seq_len": config["seq_len"],
                     "score_max_batches": config["score_max_batches"],
                     "selection_objective": config.get("selection_objective"),
-                    "depth_selection_mode": config.get("depth_selection_mode"),
-                    "depth_min_gap": config.get("depth_min_gap"),
                     "outlier_metric": config.get("outlier_metric"),
                     "outlier_weight": config.get("outlier_weight"),
                     "post_depth_recalibration": config.get("post_depth_recalibration"),

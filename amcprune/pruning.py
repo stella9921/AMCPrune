@@ -35,33 +35,6 @@ def select_blocks_from_ranking(ranking, num_blocks, pruning_ratio):
     return list(ranking)[:count]
 
 
-def select_non_adjacent_blocks_from_ranking(ranking, num_blocks, pruning_ratio, min_gap=1):
-    count = max(1, int(round(num_blocks * pruning_ratio)))
-    count = min(count, max(num_blocks - 1, 1))
-    min_gap = max(0, int(min_gap))
-
-    ranking = [int(index) for index in ranking]
-    selected = []
-    for index in ranking:
-        if len(selected) >= count:
-            break
-        if index < 0 or index >= num_blocks:
-            continue
-        if all(abs(index - other) > min_gap for other in selected):
-            selected.append(index)
-
-    if len(selected) < count:
-        selected_set = set(selected)
-        for index in ranking:
-            if len(selected) >= count:
-                break
-            if index not in selected_set and 0 <= index < num_blocks:
-                selected.append(index)
-                selected_set.add(index)
-
-    return sorted(selected)
-
-
 def apply_block_skip(model, block_path, selected_indices):
     parent = model
     parts = block_path.split(".")
