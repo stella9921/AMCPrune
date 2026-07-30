@@ -842,6 +842,8 @@ def main():
                     max_batches=int(config["boundary_compensation_max_batches"]),
                     depth_pruned_blocks=depth_pruned_blocks,
                     channel_ratio=float(config["boundary_compensation_channel_ratio"]),
+                    outlier_weight=float(config["outlier_weight"]),
+                    memory_weight=float(config["memory_weight"]),
                     eps=float(config["boundary_compensation_eps"]),
                 )
             memory_trace.record("boundary_compensation_estimation")

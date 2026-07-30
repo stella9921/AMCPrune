@@ -3,6 +3,17 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 
+def _min_max_normalize(values, eps=1.0e-12):
+    if values.numel() == 0:
+        return values
+    min_value = values.min()
+    max_value = values.max()
+    denom = max_value - min_value
+    if float(denom.item()) <= eps:
+        return torch.zeros_like(values)
+    return (values - min_value) / (denom + eps)
+
+
 class BoundaryAffineWrapper(nn.Module):
     def __init__(self, block, alpha, beta):
         super().__init__()
@@ -54,6 +65,8 @@ def estimate_boundary_affine_compensation(
     max_batches,
     depth_pruned_blocks,
     channel_ratio=1.0,
+    outlier_weight=0.25,
+    memory_weight=0.25,
     eps=1.0e-6,
 ):
     boundary = boundary_indices_for_depth_pruning(depth_pruned_blocks, len(blocks))
@@ -128,14 +141,23 @@ def estimate_boundary_affine_compensation(
     alpha = target_std / source_std
     beta = target_mean - alpha * source_mean
     mismatch = torch.abs(target_mean - source_mean) + torch.abs(target_std - source_std)
+    outlier_risk = torch.maximum(source_sumsq / token_count, target_sumsq / token_count)
+    # Hidden-channel affine compensation has the same inference overhead per channel:
+    # one scale and one bias. The cost term therefore controls the selected budget
+    # through channel_ratio, while keeping the Lagrangian objective explicit.
+    resource_cost = torch.ones_like(mismatch) * 2.0
+    mismatch_norm = _min_max_normalize(mismatch)
+    outlier_norm = _min_max_normalize(outlier_risk)
+    resource_norm = _min_max_normalize(resource_cost)
+    objective = mismatch_norm + float(outlier_weight) * outlier_norm - float(memory_weight) * resource_norm
     ratio = min(max(float(channel_ratio), 0.0), 1.0)
     if ratio >= 1.0:
         channel_mask = torch.ones_like(mismatch, dtype=torch.bool)
     elif ratio <= 0.0:
         channel_mask = torch.zeros_like(mismatch, dtype=torch.bool)
     else:
-        selected_count = max(1, int(round(mismatch.numel() * ratio)))
-        selected_indices = torch.topk(mismatch, k=selected_count, largest=True).indices
+        selected_count = max(1, int(round(objective.numel() * ratio)))
+        selected_indices = torch.topk(objective, k=selected_count, largest=True).indices
         channel_mask = torch.zeros_like(mismatch, dtype=torch.bool)
         channel_mask[selected_indices] = True
 
@@ -150,14 +172,25 @@ def estimate_boundary_affine_compensation(
         "source_original_index": source_index,
         "target_original_index": target_index,
         "calibration_tokens": token_count,
+        "selection_objective": "lagrangian_boundary_mismatch_outlier_resource",
         "channel_ratio": ratio,
         "selected_channels": int(channel_mask.sum().item()),
         "total_channels": int(channel_mask.numel()),
+        "outlier_weight": float(outlier_weight),
+        "memory_weight": float(memory_weight),
         "alpha": alpha.detach(),
         "beta": beta.detach(),
         "mismatch_mean": float(mismatch.mean().item()),
         "mismatch_std": float(mismatch.std(unbiased=False).item()),
         "selected_mismatch_mean": float(mismatch[channel_mask].mean().item()) if bool(channel_mask.any()) else 0.0,
+        "outlier_risk_mean": float(outlier_risk.mean().item()),
+        "outlier_risk_std": float(outlier_risk.std(unbiased=False).item()),
+        "selected_outlier_risk_mean": float(outlier_risk[channel_mask].mean().item()) if bool(channel_mask.any()) else 0.0,
+        "resource_cost_per_channel": 2.0,
+        "resource_cost_total": float(resource_cost[channel_mask].sum().item()),
+        "objective_mean": float(objective.mean().item()),
+        "objective_std": float(objective.std(unbiased=False).item()),
+        "selected_objective_mean": float(objective[channel_mask].mean().item()) if bool(channel_mask.any()) else 0.0,
         "alpha_mean": float(alpha.mean().item()),
         "alpha_std": float(alpha.std(unbiased=False).item()),
         "beta_mean": float(beta.mean().item()),
@@ -190,9 +223,13 @@ def apply_boundary_affine_compensation(model, block_path, kept_original_indices,
         "target_original_index": target_original_index,
         "target_new_index": target_new_index,
         "calibration_tokens": int(compensation.get("calibration_tokens", 0)),
+        "selection_objective": compensation.get("selection_objective", "boundary_mismatch_topk"),
         "channel_ratio": float(compensation.get("channel_ratio", 1.0)),
         "selected_channels": int(compensation.get("selected_channels", 0)),
         "total_channels": int(compensation.get("total_channels", 0)),
+        "outlier_weight": float(compensation.get("outlier_weight", 0.0)),
+        "memory_weight": float(compensation.get("memory_weight", 0.0)),
+        "resource_cost_total": float(compensation.get("resource_cost_total", 0.0)),
         "alpha_mean": float(compensation.get("alpha_mean", 0.0)),
         "alpha_std": float(compensation.get("alpha_std", 0.0)),
         "beta_mean": float(compensation.get("beta_mean", 0.0)),
