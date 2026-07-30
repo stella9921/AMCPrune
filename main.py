@@ -87,6 +87,7 @@ DEFAULT_CONFIG = {
     "memory_weight": 0.25,
     "boundary_compensation": False,
     "boundary_compensation_max_batches": 8,
+    "boundary_compensation_channel_ratio": 1.0,
     "boundary_compensation_eps": 1.0e-6,
     "preservation_max_batches": 8,
     "inference_prompt": "The future of artificial intelligence is",
@@ -154,6 +155,7 @@ def parse_args():
     parser.add_argument("--boundary-compensation", dest="boundary_compensation", action="store_true", default=None)
     parser.add_argument("--no-boundary-compensation", dest="boundary_compensation", action="store_false")
     parser.add_argument("--boundary-compensation-max-batches", dest="boundary_compensation_max_batches", type=int, default=None)
+    parser.add_argument("--boundary-compensation-channel-ratio", dest="boundary_compensation_channel_ratio", type=float, default=None)
     parser.add_argument("--boundary-compensation-eps", dest="boundary_compensation_eps", type=float, default=None)
     parser.add_argument(
         "--preservation-max-batches",
@@ -367,7 +369,8 @@ def print_config_summary(config):
         f"exclude_depth_boundary_blocks={config.get('exclude_depth_boundary_blocks')} "
         f"unit_hvp_k_horizon={config.get('unit_hvp_k_horizon')} "
         f"memory_weight={config.get('memory_weight')} "
-        f"boundary_compensation={config.get('boundary_compensation')}"
+        f"boundary_compensation={config.get('boundary_compensation')} "
+        f"boundary_compensation_channel_ratio={config.get('boundary_compensation_channel_ratio')}"
     )
 
 
@@ -838,6 +841,7 @@ def main():
                     batch_size=int(config["batch_size"]),
                     max_batches=int(config["boundary_compensation_max_batches"]),
                     depth_pruned_blocks=depth_pruned_blocks,
+                    channel_ratio=float(config["boundary_compensation_channel_ratio"]),
                     eps=float(config["boundary_compensation_eps"]),
                 )
             memory_trace.record("boundary_compensation_estimation")

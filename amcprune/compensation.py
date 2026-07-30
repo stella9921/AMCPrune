@@ -53,6 +53,7 @@ def estimate_boundary_affine_compensation(
     batch_size,
     max_batches,
     depth_pruned_blocks,
+    channel_ratio=1.0,
     eps=1.0e-6,
 ):
     boundary = boundary_indices_for_depth_pruning(depth_pruned_blocks, len(blocks))
@@ -126,15 +127,37 @@ def estimate_boundary_affine_compensation(
     target_std = torch.sqrt(target_var + eps)
     alpha = target_std / source_std
     beta = target_mean - alpha * source_mean
+    mismatch = torch.abs(target_mean - source_mean) + torch.abs(target_std - source_std)
+    ratio = min(max(float(channel_ratio), 0.0), 1.0)
+    if ratio >= 1.0:
+        channel_mask = torch.ones_like(mismatch, dtype=torch.bool)
+    elif ratio <= 0.0:
+        channel_mask = torch.zeros_like(mismatch, dtype=torch.bool)
+    else:
+        selected_count = max(1, int(round(mismatch.numel() * ratio)))
+        selected_indices = torch.topk(mismatch, k=selected_count, largest=True).indices
+        channel_mask = torch.zeros_like(mismatch, dtype=torch.bool)
+        channel_mask[selected_indices] = True
+
+    identity_alpha = torch.ones_like(alpha)
+    identity_beta = torch.zeros_like(beta)
+    alpha = torch.where(channel_mask, alpha, identity_alpha)
+    beta = torch.where(channel_mask, beta, identity_beta)
 
     return {
         "enabled": True,
-        "mode": "boundary_affine",
+        "mode": "boundary_affine_channelwise",
         "source_original_index": source_index,
         "target_original_index": target_index,
         "calibration_tokens": token_count,
+        "channel_ratio": ratio,
+        "selected_channels": int(channel_mask.sum().item()),
+        "total_channels": int(channel_mask.numel()),
         "alpha": alpha.detach(),
         "beta": beta.detach(),
+        "mismatch_mean": float(mismatch.mean().item()),
+        "mismatch_std": float(mismatch.std(unbiased=False).item()),
+        "selected_mismatch_mean": float(mismatch[channel_mask].mean().item()) if bool(channel_mask.any()) else 0.0,
         "alpha_mean": float(alpha.mean().item()),
         "alpha_std": float(alpha.std(unbiased=False).item()),
         "beta_mean": float(beta.mean().item()),
@@ -162,11 +185,14 @@ def apply_boundary_affine_compensation(model, block_path, kept_original_indices,
     blocks[target_new_index] = BoundaryAffineWrapper(blocks[target_new_index], alpha, beta)
     return {
         "enabled": True,
-        "mode": "boundary_affine",
+        "mode": compensation.get("mode", "boundary_affine_channelwise"),
         "source_original_index": int(compensation["source_original_index"]),
         "target_original_index": target_original_index,
         "target_new_index": target_new_index,
         "calibration_tokens": int(compensation.get("calibration_tokens", 0)),
+        "channel_ratio": float(compensation.get("channel_ratio", 1.0)),
+        "selected_channels": int(compensation.get("selected_channels", 0)),
+        "total_channels": int(compensation.get("total_channels", 0)),
         "alpha_mean": float(compensation.get("alpha_mean", 0.0)),
         "alpha_std": float(compensation.get("alpha_std", 0.0)),
         "beta_mean": float(compensation.get("beta_mean", 0.0)),
